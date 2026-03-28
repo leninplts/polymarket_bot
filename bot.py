@@ -17,6 +17,7 @@ import argparse
 from datetime import datetime
 
 import config
+import wallet_manager
 from wallet_monitor import WalletMonitor
 from trader import Trader
 import market_cache
@@ -30,7 +31,9 @@ SUMMARY_INTERVAL = 1800  # 30 minutes
 class CopyTradingBot:
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
-        self.monitor = WalletMonitor(config.TARGET_WALLETS)
+        # Initialize wallet manager from config if first run
+        wallet_manager.init_from_config(config.TARGET_WALLETS)
+        self.monitor = WalletMonitor(wallet_manager.get_addresses())
         self.trader = None if dry_run else Trader()
         self.running = False
         self.stats = {"trades_detected": 0, "trades_copied": 0, "trades_skipped": 0}
@@ -41,17 +44,19 @@ class CopyTradingBot:
 
     def _print_header(self):
         mode = "DRY RUN" if self.dry_run else "LIVE"
+        wallets = wallet_manager.get_all()
         print("=" * 60)
         print(f"  Polymarket Copy-Trading Bot [{mode}]")
-        print(f"  Monitoring {len(config.TARGET_WALLETS)} wallet(s)")
+        print(f"  Monitoring {len(wallets)} wallet(s)")
         print(f"  Sizing: dynamic (max ${config.FIXED_AMOUNT} based on probability)")
         print(f"  Max slippage: {config.MAX_SLIPPAGE:.1%}")
         print(f"  Poll interval: {config.POLL_INTERVAL}s")
         print(f"  Summary every: {SUMMARY_INTERVAL // 60} min")
         print("=" * 60)
 
-        for w in config.TARGET_WALLETS:
-            print(f"  Tracking: {w[:10]}...{w[-6:]}")
+        for w in wallets:
+            nick = w.get("nickname") or f"{w['address'][:10]}...{w['address'][-6:]}"
+            print(f"  Tracking: {nick} ({w['address'][:10]}...{w['address'][-6:]})")
         print()
 
     def _get_market_info(self, trade: dict) -> tuple[str, str, str]:
@@ -200,7 +205,7 @@ class CopyTradingBot:
     def run(self):
         """Main bot loop."""
         self._print_header()
-        tg.notify_bot_started(config.TARGET_WALLETS, self.dry_run)
+        tg.notify_bot_started(wallet_manager.get_addresses(), self.dry_run)
 
         if not self.dry_run:
             balance = self.trader.get_balance()

@@ -28,8 +28,12 @@ def _send(text: str, parse_mode: str = "HTML"):
 
 
 def _trader_link(wallet: str) -> str:
-    short = f"{wallet[:10]}...{wallet[-6:]}"
-    return f'<a href="https://polymarket.com/profile/{wallet}">{short}</a>'
+    try:
+        import wallet_manager
+        nick = wallet_manager.get_nickname(wallet)
+    except Exception:
+        nick = f"{wallet[:10]}...{wallet[-6:]}"
+    return f'<a href="https://polymarket.com/profile/{wallet}">{nick}</a>'
 
 
 def _market_link(market_name: str, slug: str = None, event_slug: str = None) -> str:
