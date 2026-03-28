@@ -6,7 +6,9 @@ import time
 import requests
 import config
 
-POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+POSITIONS_FILE = os.path.join(DATA_DIR, "positions.json")
 
 # Stop-loss: close if position drops more than this % from entry
 STOP_LOSS_PCT = 0.30  # 30%

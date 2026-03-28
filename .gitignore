@@ -2,5 +2,4 @@
 __pycache__/
 *.pyc
 .env
-wallets.json
-positions.json
+data/

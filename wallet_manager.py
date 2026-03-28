@@ -3,7 +3,9 @@
 import json
 import os
 
-WALLETS_FILE = os.path.join(os.path.dirname(__file__), "wallets.json")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+WALLETS_FILE = os.path.join(DATA_DIR, "wallets.json")
 
 
 def _load() -> list[dict]:
