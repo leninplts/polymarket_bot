@@ -187,6 +187,65 @@ def get_skip_counter() -> int:
     return _skip_counter
 
 
+# ─── POSITION CLOSED ────────────────────────────────────
+
+def notify_position_closed(position: dict, exit_price: float, reason: str, slug: str = None, event_slug: str = None):
+    """Notification when a position is closed (exit copy or stop-loss)."""
+    market_name = position.get("market_name", "Unknown")
+    market_display = _market_link(market_name, slug, event_slug)
+    entry_price = position.get("entry_price", 0)
+    pnl = position.get("pnl", 0)
+    size = position.get("size", 0)
+    source = position.get("source_wallet", "")
+
+    if entry_price > 0:
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+    else:
+        pnl_pct = 0
+
+    # Duration
+    opened = position.get("opened_at", 0)
+    closed = position.get("closed_at", 0)
+    if opened and closed:
+        duration_min = (closed - opened) / 60
+        if duration_min < 60:
+            duration = f"{duration_min:.0f} min"
+        elif duration_min < 1440:
+            duration = f"{duration_min / 60:.1f} horas"
+        else:
+            duration = f"{duration_min / 1440:.1f} dias"
+    else:
+        duration = "?"
+
+    if pnl >= 0:
+        emoji = "💰"
+        header = "POSICION CERRADA — GANANCIA"
+        pnl_bar = "🟩" * min(int(abs(pnl_pct) / 5) + 1, 10)
+    else:
+        emoji = "💸"
+        header = "POSICION CERRADA — PERDIDA"
+        pnl_bar = "🟥" * min(int(abs(pnl_pct) / 5) + 1, 10)
+
+    text = (
+        f"{'━' * 28}\n"
+        f"{emoji} <b>{header}</b>\n"
+        f"{'━' * 28}\n\n"
+        f"📌 {market_display}\n"
+        f"    {pnl_bar}\n\n"
+        f"    Entrada: {entry_price}\n"
+        f"    Salida:  {exit_price}\n"
+        f"    Size:    ${size:.2f}\n"
+        f"    PnL:     <b>${pnl:,.2f}</b> ({pnl_pct:+.1f}%)\n"
+        f"    Duracion: {duration}\n\n"
+        f"    📋 Razon: {reason}"
+    )
+
+    if source:
+        text += f"\n    👤 Trader: {_trader_link(source)}"
+
+    _send(text)
+
+
 # ─── COPIED TRADE RESULT ────────────────────────────────
 
 def notify_position_update(market_name: str, side: str, entry_price: float, current_price: float, our_size: float, slug: str = None, event_slug: str = None):

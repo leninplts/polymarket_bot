@@ -152,6 +152,34 @@ class Trader:
             print(f"[trader] Failed to place order: {e}")
             return None
 
+    def execute_sell(self, token_id: str, size: float) -> dict | None:
+        """Sell a position (for stop-loss or copying trader exit)."""
+        current_price = self._get_current_price(token_id, "SELL")
+        if current_price is None:
+            print(f"[trader] Cannot get SELL price for {token_id}")
+            return None
+
+        try:
+            order_args = OrderArgs(
+                price=current_price,
+                size=size,
+                side="SELL",
+                token_id=token_id,
+            )
+
+            signed_order = self.client.create_order(order_args)
+            result = self.client.post_order(signed_order, OrderType.GTC)
+
+            market = market_cache.get_market_by_token(token_id)
+            market_name = market.get("question", token_id) if market else token_id
+
+            print(f"[trader] SELL ORDER: {size} @ {current_price} on '{market_name}'")
+            return {"result": result, "price": current_price}
+
+        except Exception as e:
+            print(f"[trader] Failed to place sell order: {e}")
+            return None
+
     def get_balance(self) -> dict | None:
         """Check USDC balance and allowance."""
         try:

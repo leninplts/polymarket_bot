@@ -42,6 +42,7 @@ class TelegramCommands:
                     {"command": "addwallet", "description": "Agregar wallet: /addwallet 0x... nombre"},
                     {"command": "removewallet", "description": "Quitar wallet: /removewallet 0x..."},
                     {"command": "pnl", "description": "Ver PnL de traders"},
+                    {"command": "portfolio", "description": "Ver nuestras posiciones abiertas"},
                     {"command": "scan", "description": "Buscar nuevas wallets rentables"},
                     {"command": "stop", "description": "Detener el bot"},
                 ]},
@@ -111,6 +112,8 @@ class TelegramCommands:
             self._cmd_remove_wallet(args)
         elif cmd == "/pnl":
             self._cmd_pnl()
+        elif cmd == "/portfolio":
+            self._cmd_portfolio()
         elif cmd == "/scan":
             self._cmd_scan()
         elif cmd == "/stop":
@@ -130,6 +133,7 @@ class TelegramCommands:
                 "/addwallet 0x... nick — Agregar\n"
                 "/removewallet 0x... — Quitar\n"
                 "/pnl — Ver PnL\n"
+                "/portfolio — Nuestras posiciones\n"
                 "/scan — Buscar wallets rentables"
             )
 
@@ -316,6 +320,38 @@ class TelegramCommands:
             f"{'━' * 28}\n\n"
             + "\n\n".join(lines)
         )
+
+    def _cmd_portfolio(self):
+        summary = self.bot.positions.get_portfolio_summary()
+
+        if summary["open_count"] == 0 and summary["realized_pnl"] == 0:
+            self._reply("📭 No hay posiciones abiertas ni cerradas.")
+            return
+
+        emoji = "📈" if summary["total_pnl"] >= 0 else "📉"
+        text = (
+            f"{'━' * 28}\n"
+            f"📊 <b>NUESTRO PORTFOLIO</b>\n"
+            f"{'━' * 28}\n\n"
+            f"Posiciones abiertas: <b>{summary['open_count']}</b>\n"
+            f"Invertido: <b>${summary['total_invested']:,.2f}</b>\n"
+            f"PnL no realizado: <b>${summary['unrealized_pnl']:,.2f}</b>\n"
+            f"PnL realizado: <b>${summary['realized_pnl']:,.2f}</b>\n"
+            f"{emoji} PnL total: <b>${summary['total_pnl']:,.2f}</b>\n"
+        )
+
+        if summary["positions"]:
+            text += "\n<b>Posiciones abiertas:</b>\n"
+            for p in summary["positions"]:
+                em = "✅" if p["pnl"] >= 0 else "❌"
+                market = p["market_name"][:30]
+                text += (
+                    f"\n  {em} {market}\n"
+                    f"      Entrada: {p['entry_price']} → Actual: {p['current_price']}\n"
+                    f"      PnL: <b>${p['pnl']:,.2f}</b> ({p['pnl_pct']:+.1f}%)\n"
+                )
+
+        self._reply(text)
 
     # ─── Scanner ─────────────────────────────────────────
 
