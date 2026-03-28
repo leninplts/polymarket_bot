@@ -2,10 +2,11 @@
 Polymarket Copy-Trading Bot
 
 Monitors profitable wallets and copies their trades on Polymarket.
+Starts in DRY RUN by default — use /live from Telegram to activate.
 
 Usage:
-    python bot.py              # Run the copy-trading bot
-    python bot.py --dry-run    # Monitor only, don't place orders
+    python bot.py              # Run in dry-run (default, safe)
+    python bot.py --live       # Run in live mode (real trades)
     python bot.py --status     # Show target wallet positions/PnL
 """
 
@@ -21,31 +22,29 @@ from trader import Trader
 import market_cache
 import telegram_notifier as tg
 from telegram_commands import TelegramCommands
+from reliability_tracker import ReliabilityTracker
 
 SUMMARY_INTERVAL = 1800  # 30 minutes
 
 
 class CopyTradingBot:
-    def __init__(self, dry_run: bool = False):
+    def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
         self.monitor = WalletMonitor(config.TARGET_WALLETS)
         self.trader = None if dry_run else Trader()
         self.running = False
         self.stats = {"trades_detected": 0, "trades_copied": 0, "trades_skipped": 0}
-        self.skipped_trades = []  # Track skipped trades for outcome checks
+        self.skipped_trades = []
         self.last_summary = 0
         self.commands = TelegramCommands(self)
+        self.reliability = ReliabilityTracker()
 
     def _print_header(self):
         mode = "DRY RUN" if self.dry_run else "LIVE"
         print("=" * 60)
         print(f"  Polymarket Copy-Trading Bot [{mode}]")
         print(f"  Monitoring {len(config.TARGET_WALLETS)} wallet(s)")
-        print(f"  Sizing: {config.SIZING_MODE} ", end="")
-        if config.SIZING_MODE == "fixed":
-            print(f"({config.FIXED_AMOUNT} USDC per trade)")
-        else:
-            print(f"({config.PROPORTIONAL_FACTOR:.0%} of target size)")
+        print(f"  Sizing: dynamic (max ${config.FIXED_AMOUNT} based on probability)")
         print(f"  Max slippage: {config.MAX_SLIPPAGE:.1%}")
         print(f"  Poll interval: {config.POLL_INTERVAL}s")
         print(f"  Summary every: {SUMMARY_INTERVAL // 60} min")
@@ -89,6 +88,13 @@ class CopyTradingBot:
 
         tg.notify_trade_detected(trade, market_name, slug, event_slug)
 
+        # Check if this wallet is paused due to bad performance
+        if self.reliability.is_wallet_paused(trade.get("wallet", "")):
+            print("  Action:  SKIPPED (trader paused - bad performance)")
+            self.stats["trades_skipped"] += 1
+            tg.notify_trade_skipped(trade, market_name, "Trader pausado por mal rendimiento", slug, event_slug)
+            return
+
         if self.dry_run:
             print("  Action:  SKIPPED (dry run)")
             self.stats["trades_skipped"] += 1
@@ -109,13 +115,18 @@ class CopyTradingBot:
         result = self.trader.execute_copy_trade(trade)
         if result:
             self.stats["trades_copied"] += 1
-            our_size = config.FIXED_AMOUNT if config.SIZING_MODE == "fixed" else trade.get("size", 0) * config.PROPORTIONAL_FACTOR
+            price = trade.get("price", 0)
+            our_size = self.trader._calculate_size(trade.get("size", 0), price)
             print(f"  Action:  COPIED -> {result}")
             tg.notify_trade_copied(
-                trade, market_name, our_size,
-                trade.get("price", 0),
+                trade, market_name, our_size, price,
                 result if isinstance(result, dict) else {"id": str(result)},
                 slug, event_slug,
+            )
+            # Record for reliability tracking
+            self.reliability.record_trade(
+                trade.get("token_id", ""), trade.get("side", "BUY"),
+                price, trade.get("wallet", ""),
             )
         else:
             self.stats["trades_skipped"] += 1
@@ -140,7 +151,6 @@ class CopyTradingBot:
 
         still_pending = []
         for skipped in self.skipped_trades:
-            # Wait at least 10 minutes before checking outcome
             if time.time() - skipped["timestamp"] < 600:
                 still_pending.append(skipped)
                 continue
@@ -170,7 +180,6 @@ class CopyTradingBot:
                         skipped.get("slug"),
                         skipped.get("event_slug"),
                     )
-                    # Don't check this one again
                     continue
             except Exception as e:
                 print(f"[outcome] Error checking {token_id}: {e}")
@@ -198,7 +207,6 @@ class CopyTradingBot:
             if balance:
                 print(f"[balance] {balance}\n")
 
-        # Initial poll to set baseline (don't copy old trades)
         print("[init] Fetching initial wallet state (skipping existing trades)...")
         self.monitor.get_new_trades()
         print("[init] Baseline set. Watching for new trades...\n")
@@ -225,11 +233,9 @@ class CopyTradingBot:
                     sys.stdout.write(".")
                     sys.stdout.flush()
 
-                # Check outcomes of skipped trades
                 self._check_skipped_outcomes()
-
-                # Periodic summary
                 self._send_periodic_summary()
+                self.reliability.check_reliability()
 
             except Exception as e:
                 print(f"\n[error] {e}")
@@ -262,7 +268,7 @@ def show_status():
 
 def main():
     parser = argparse.ArgumentParser(description="Polymarket Copy-Trading Bot")
-    parser.add_argument("--dry-run", action="store_true", help="Monitor only, don't place orders")
+    parser.add_argument("--live", action="store_true", help="Run in live mode (real trades)")
     parser.add_argument("--status", action="store_true", help="Show target wallet PnL and exit")
     args = parser.parse_args()
 
@@ -274,7 +280,7 @@ def main():
         show_status()
         return
 
-    bot = CopyTradingBot(dry_run=args.dry_run)
+    bot = CopyTradingBot(dry_run=not args.live)
     bot.run()
 
 

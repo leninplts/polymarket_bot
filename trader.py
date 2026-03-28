@@ -36,13 +36,42 @@ class Trader:
 
         self.client.set_api_creds(self.creds)
 
-    def _calculate_size(self, target_size: float) -> float:
-        """Calculate our order size based on the sizing mode."""
-        if config.SIZING_MODE == "fixed":
-            return config.FIXED_AMOUNT
-        elif config.SIZING_MODE == "proportional":
-            return round(target_size * config.PROPORTIONAL_FACTOR, 2)
-        return config.FIXED_AMOUNT
+    def _calculate_size(self, target_size: float, price: float = 0) -> float:
+        """Calculate order size based on probability (price).
+
+        Higher probability = more confidence = bigger bet (up to max).
+        Sweet spot is 0.45-0.70 where there's good probability + upside.
+
+        Price range → % of max:
+          0.05 - 0.20  →  20%  (very risky, small bet)
+          0.20 - 0.35  →  40%  (risky)
+          0.35 - 0.50  →  60%  (moderate)
+          0.50 - 0.65  →  80%  (good probability)
+          0.65 - 0.80  → 100%  (sweet spot: high prob + decent upside)
+          0.80 - 0.95  →  50%  (very likely but low upside)
+        """
+        max_amount = config.FIXED_AMOUNT
+
+        if config.SIZING_MODE == "proportional":
+            max_amount = round(target_size * config.PROPORTIONAL_FACTOR, 2)
+
+        if price <= 0 or price >= 1:
+            return round(max_amount * 0.2, 2)
+
+        if price < 0.20:
+            factor = 0.20
+        elif price < 0.35:
+            factor = 0.40
+        elif price < 0.50:
+            factor = 0.60
+        elif price < 0.65:
+            factor = 0.80
+        elif price < 0.80:
+            factor = 1.00
+        else:
+            factor = 0.50
+
+        return round(max(1, max_amount * factor), 2)
 
     def _get_current_price(self, token_id: str, side: str) -> float | None:
         """Get the current best price for a token."""
@@ -71,7 +100,7 @@ class Trader:
         if side not in ("BUY", "SELL"):
             side = "BUY"
 
-        our_size = self._calculate_size(trade.get("size", 0))
+        our_size = self._calculate_size(trade.get("size", 0), price=trade.get("price", 0))
         if our_size <= 0:
             print(f"[trader] Calculated size is 0, skipping")
             return None
