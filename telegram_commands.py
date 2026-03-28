@@ -320,7 +320,7 @@ class TelegramCommands:
     # ─── Scanner ─────────────────────────────────────────
 
     def _cmd_scan(self):
-        self._reply("🔍 <b>Escaneando mercados...</b>\nEsto puede tardar 1-2 minutos.")
+        self._reply("🔍 <b>Escaneando mercados...</b>\n50 mercados × 500 trades c/u\nEsto puede tardar 3-5 minutos.")
 
         # Run in a thread to not block command processing
         t = threading.Thread(target=self._run_scan, daemon=True)
@@ -336,8 +336,8 @@ class TelegramCommands:
             if not results:
                 self._reply(
                     "🔍 <b>Scan completado</b>\n\n"
-                    "No se encontraron wallets que cumplan los criterios:\n"
-                    "  PnL > $500 | WR > 55% | 10+ posiciones | Activo < 7d"
+                    "No se encontraron wallets que cumplan:\n"
+                    "  PnL>$500 | WR>55% | 10+pos | Activo<7d | Cuenta>30d"
                 )
                 return
 
@@ -345,21 +345,33 @@ class TelegramCommands:
             current = set(wallet_manager.get_addresses())
             new_results = [r for r in results if r["address"] not in current]
 
-            text = (
+            # Send header
+            self._reply(
                 f"{'━' * 28}\n"
                 f"🔍 <b>SCAN COMPLETADO</b>\n"
                 f"{'━' * 28}\n\n"
-                f"Encontradas: <b>{len(results)}</b> wallets\n"
-                f"Nuevas: <b>{len(new_results)}</b>\n\n"
+                f"Total encontradas: <b>{len(results)}</b>\n"
+                f"Nuevas (no agregadas): <b>{len(new_results)}</b>\n"
+                f"Ya monitoreadas: <b>{len(results) - len(new_results)}</b>"
             )
 
-            for w in new_results[:5]:
-                text += format_wallet_summary(w) + "\n\n"
+            # Send wallets in batches of 3 to avoid message size limits
+            import time as _time
+            for i in range(0, min(len(new_results), 10), 3):
+                batch = new_results[i:i + 3]
+                text = ""
+                for j, w in enumerate(batch, i + 1):
+                    text += f"<b>#{j}</b> " + format_wallet_summary(w) + "\n\n"
+                self._reply(text)
+                _time.sleep(0.5)
 
             if new_results:
                 top = new_results[0]
                 name = top.get("nickname") or "trader"
-                text += f"Para agregar la mejor:\n<code>/addwallet {top['address']} {name}</code>"
+                self._reply(
+                    f"💡 Para agregar la mejor:\n"
+                    f"<code>/addwallet {top['address']} {name}</code>"
+                )
 
             self._reply(text)
 
