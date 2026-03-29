@@ -33,6 +33,7 @@ from reliability_tracker import ReliabilityTracker
 
 SUMMARY_INTERVAL = 1800  # 30 minutes
 STOP_LOSS_CHECK_INTERVAL = 60  # Check stop-losses every 60 seconds
+TRADE_BUFFER_WINDOW = 60  # Seconds to aggregate fragmented orders from same market
 
 
 class CopyTradingBot:
@@ -47,6 +48,9 @@ class CopyTradingBot:
         self.skipped_trades = []
         self.last_summary = 0
         self.last_sl_check = 0
+        # Buffer for aggregating fragmented orders: key = (wallet, condition_id)
+        # value = {first_trade, total_size, total_usdc, count, first_seen, last_seen, notified_first}
+        self._trade_buffer: dict = {}
         self.commands = TelegramCommands(self)
         self.reliability = ReliabilityTracker()
 
@@ -86,31 +90,95 @@ class CopyTradingBot:
         return ("Unknown", "", "")
 
     def _handle_trade(self, trade: dict):
-        """Process a detected trade — BUY or SELL."""
+        """
+        Process a detected trade.
+        BUYs go through the aggregation buffer to collapse fragmented orders.
+        SELLs are processed immediately.
+        """
         self.stats["trades_detected"] += 1
-        wallet_short = f"{trade['wallet'][:10]}...{trade['wallet'][-6:]}"
-        market_name, slug, event_slug = self._get_market_info(trade)
         side = trade.get("side", "BUY")
         token_id = trade.get("token_id", "")
+        condition_id = trade.get("condition_id", "") or token_id
 
-        print(
-            f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-            f"TRADE DETECTED from {wallet_short}"
-        )
-        print(f"  Market:  {market_name}")
-        print(f"  Side:    {side}")
-        print(f"  Size:    {trade.get('size', '?')}")
-        print(f"  Price:   {trade.get('price', '?')}")
-        print(f"  Outcome: {trade.get('outcome', '?')}")
-
-        tg.notify_trade_detected(trade, market_name, slug, event_slug)
-
-        # ── SELL detected: copy the exit if we have that position ──
-        if side == "SELL" and token_id and self.positions.has_position(token_id):
-            self._handle_exit(trade, market_name, slug, event_slug)
+        # SELLs: always immediate — exits are time-critical
+        if side == "SELL":
+            market_name, slug, event_slug = self._get_market_info(trade)
+            if token_id and self.positions.has_position(token_id):
+                tg.notify_trade_detected(trade, market_name, slug, event_slug)
+                self._handle_exit(trade, market_name, slug, event_slug)
             return
 
-        # ── BUY detected: copy the entry ──
+        # BUYs: aggregate into buffer
+        buf_key = (trade.get("wallet", ""), condition_id)
+        now = time.time()
+
+        if buf_key not in self._trade_buffer:
+            # First order for this market — notify immediately and open entry
+            market_name, slug, event_slug = self._get_market_info(trade)
+            self._trade_buffer[buf_key] = {
+                "first_trade": trade,
+                "market_name": market_name,
+                "slug": slug,
+                "event_slug": event_slug,
+                "total_size": float(trade.get("size", 0)),
+                "total_usdc": float(trade.get("raw", {}).get("usdcSize", 0)),
+                "count": 1,
+                "first_seen": now,
+                "last_price": float(trade.get("price", 0)),
+            }
+            wallet_short = f"{trade['wallet'][:10]}...{trade['wallet'][-6:]}"
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] TRADE DETECTED from {wallet_short}")
+            print(f"  Market:  {market_name}")
+            print(f"  Side:    {side} (primera orden, buffer abierto 60s)")
+            print(f"  Price:   {trade.get('price', '?')}")
+
+            tg.notify_trade_detected(trade, market_name, slug, event_slug)
+            self._execute_buy(trade, market_name, slug, event_slug)
+        else:
+            # Subsequent order for same market — just accumulate, no new notification
+            buf = self._trade_buffer[buf_key]
+            buf["total_size"] += float(trade.get("size", 0))
+            buf["total_usdc"] += float(trade.get("raw", {}).get("usdcSize", 0))
+            buf["count"] += 1
+            buf["last_price"] = float(trade.get("price", 0))
+
+    def _flush_trade_buffers(self):
+        """
+        Every poll cycle: flush buffers older than TRADE_BUFFER_WINDOW.
+        Sends a summary message if there were multiple orders.
+        """
+        now = time.time()
+        to_delete = []
+
+        for buf_key, buf in self._trade_buffer.items():
+            if now - buf["first_seen"] < TRADE_BUFFER_WINDOW:
+                continue
+
+            to_delete.append(buf_key)
+
+            if buf["count"] > 1:
+                wallet, _ = buf_key
+                nick = wallet_manager.get_nickname(wallet)
+                market_name = buf["market_name"]
+                total_usdc = buf["total_usdc"]
+                total_size = buf["total_size"]
+                count = buf["count"]
+                last_price = buf["last_price"]
+
+                print(f"\n[buffer] {nick} — {market_name}: {count} ordenes, ${total_usdc:.2f} USDC total")
+                tg.notify_trade_buffer_summary(
+                    nick, market_name, count, total_usdc, total_size,
+                    buf["first_trade"].get("price", 0), last_price,
+                    buf["slug"], buf["event_slug"],
+                )
+
+        for k in to_delete:
+            del self._trade_buffer[k]
+
+    def _execute_buy(self, trade: dict, market_name: str, slug: str, event_slug: str):
+        """Execute a BUY — shared logic for buffered and direct entries."""
+        token_id = trade.get("token_id", "")
+
         if self.reliability.is_wallet_paused(trade.get("wallet", "")):
             print("  Action:  SKIPPED (trader paused - bad performance)")
             self.stats["trades_skipped"] += 1
@@ -134,7 +202,6 @@ class CopyTradingBot:
             })
             return
 
-        # Don't open duplicate positions
         if self.positions.has_position(token_id):
             print("  Action:  SKIPPED (already have this position)")
             self.stats["trades_skipped"] += 1
@@ -152,7 +219,6 @@ class CopyTradingBot:
                 result if isinstance(result, dict) else {"id": str(result)},
                 slug, event_slug,
             )
-            # Track the position
             self.positions.add_position(
                 token_id=token_id, side="BUY", size=our_size,
                 entry_price=price, market_name=market_name,
@@ -207,6 +273,54 @@ class CopyTradingBot:
         else:
             print("  Action:  EXIT FAILED")
             tg.notify_error(f"No se pudo copiar la salida en {market_name}")
+
+    def _check_market_resolutions(self):
+        """
+        Detect positions where the market has resolved (price went to ~0 or ~1).
+        These won't generate a SELL event from the trader, so we handle them here.
+        """
+        import requests as _req
+        for pos in self.positions.get_open_positions():
+            token_id = pos.get("token_id")
+            if not token_id:
+                continue
+            try:
+                resp = _req.get(
+                    f"{config.CLOB_API_URL}/midpoint",
+                    params={"token_id": token_id},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                current_price = float(resp.json().get("mid", 0))
+            except Exception:
+                continue
+
+            if current_price <= 0:
+                continue
+
+            market_name = pos.get("market_name", "Unknown")
+
+            # Market resolved YES (we win)
+            if current_price >= 0.95:
+                closed = self.positions.close_position(token_id, current_price, "market_resolved_yes")
+                if closed:
+                    print(f"\n[resolved] {market_name} — resolved YES, PnL: ${closed.get('pnl', 0):.2f}")
+                    tg.notify_position_closed(
+                        closed, current_price,
+                        "Mercado resuelto a YES (ganamos)",
+                        pos.get("slug", ""), pos.get("event_slug", ""),
+                    )
+
+            # Market resolved NO (we lose)
+            elif current_price <= 0.05:
+                closed = self.positions.close_position(token_id, current_price, "market_resolved_no")
+                if closed:
+                    print(f"\n[resolved] {market_name} — resolved NO, PnL: ${closed.get('pnl', 0):.2f}")
+                    tg.notify_position_closed(
+                        closed, current_price,
+                        "Mercado resuelto a NO (perdimos)",
+                        pos.get("slug", ""), pos.get("event_slug", ""),
+                    )
 
     def _check_stop_losses(self):
         """Periodically check positions for stop-loss triggers."""
@@ -334,7 +448,9 @@ class CopyTradingBot:
                     sys.stdout.write(".")
                     sys.stdout.flush()
 
+                self._flush_trade_buffers()
                 self._check_stop_losses()
+                self._check_market_resolutions()
                 self._check_skipped_outcomes()
                 self._send_periodic_summary()
                 self.reliability.check_reliability()

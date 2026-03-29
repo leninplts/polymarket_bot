@@ -330,6 +330,29 @@ def notify_trader_performance(wallet: str, recent_wr: float, recent_pnl: float, 
     )
 
 
+# ─── TRADE BUFFER SUMMARY ───────────────────────────────
+
+def notify_trade_buffer_summary(nickname: str, market_name: str, count: int,
+                                 total_usdc: float, total_size: float,
+                                 first_price: float, last_price: float,
+                                 slug: str = None, event_slug: str = None):
+    """Summary sent 60s after the first order, if there were multiple fragmented orders."""
+    market_display = _market_link(market_name, slug, event_slug)
+    avg_price = total_usdc / total_size if total_size > 0 else first_price
+
+    _send(
+        f"{'━' * 28}\n"
+        f"📦 <b>RESUMEN DE ORDENES ({count} total)</b>\n"
+        f"{'━' * 28}\n\n"
+        f"👤 <b>{nickname}</b>\n"
+        f"📌 {market_display}\n\n"
+        f"    💵 Total invertido: <b>${total_usdc:,.2f}</b>\n"
+        f"    🎯 Precio inicial: {first_price:.3f} → Final: {last_price:.3f}\n"
+        f"    📊 Precio promedio: {avg_price:.3f}\n"
+        f"    📋 Ordenes fragmentadas: {count}"
+    )
+
+
 # ─── ERRORS ──────────────────────────────────────────────
 
 def notify_error(error: str):
