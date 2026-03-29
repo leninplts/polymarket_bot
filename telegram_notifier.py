@@ -226,11 +226,13 @@ def notify_position_closed(position: dict, exit_price: float, reason: str, slug:
         header = "POSICION CERRADA — PERDIDA"
         pnl_bar = "🟥" * min(int(abs(pnl_pct) / 5) + 1, 10)
 
+    trader_line = f"\n👤 {_trader_link(source)}" if source else ""
+
     text = (
         f"{'━' * 28}\n"
         f"{emoji} <b>{header}</b>\n"
         f"{'━' * 28}\n\n"
-        f"📌 {market_display}\n"
+        f"📌 {market_display}{trader_line}\n"
         f"    {pnl_bar}\n\n"
         f"    Entrada: {entry_price}\n"
         f"    Salida:  {exit_price}\n"
@@ -239,9 +241,6 @@ def notify_position_closed(position: dict, exit_price: float, reason: str, slug:
         f"    Duracion: {duration}\n\n"
         f"    📋 Razon: {reason}"
     )
-
-    if source:
-        text += f"\n    👤 Trader: {_trader_link(source)}"
 
     _send(text)
 
@@ -415,18 +414,18 @@ def notify_demo_closed(position: dict, exit_price: float, reason: str,
         duration = "?"
 
     source = position.get("source_wallet", "")
+    trader_line = f"\n👤 {_trader_link(source)}" if source else ""
     _send(
         f"{'━' * 28}\n"
         f"🎮 {emoji} <b>{header}</b>\n"
         f"{'━' * 28}\n\n"
-        f"📌 {market_display}\n\n"
+        f"📌 {market_display}{trader_line}\n\n"
         f"    Entrada: {entry_price:.3f} → Salida: {exit_price:.3f}\n"
         f"    Invertido: ${cost:,.2f}\n"
         f"    PnL: <b>${pnl:,.2f}</b> ({pnl_pct:+.1f}%)\n"
         f"    Duracion: {duration}\n"
         f"    📋 {reason}\n\n"
         f"    🏦 Balance demo: <b>${balance:,.2f}</b>"
-        + (f"\n    👤 {_trader_link(source)}" if source else "")
     )
 
 
