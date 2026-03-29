@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 PRIVATE_KEY = os.environ["PRIVATE_KEY"]
 TARGET_WALLETS = [w.strip().lower() for w in os.environ["TARGET_WALLETS"].split(",") if w.strip()]

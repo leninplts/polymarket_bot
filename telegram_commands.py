@@ -22,6 +22,7 @@ class TelegramCommands:
         if not config.TELEGRAM_CHAT_ID:
             print("[telegram] WARNING: TELEGRAM_CHAT_ID no configurado — comandos deshabilitados")
             return
+        self._flush_pending_updates()
         self.running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
@@ -30,6 +31,24 @@ class TelegramCommands:
 
     def stop(self):
         self.running = False
+
+    def _flush_pending_updates(self):
+        """Discard all pending Telegram updates so we don't replay old commands on restart."""
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/getUpdates",
+                params={"offset": -1, "timeout": 0},
+                timeout=10,
+            )
+            data = resp.json()
+            results = data.get("result", [])
+            if results:
+                self.last_update_id = results[-1]["update_id"]
+                print(f"[telegram] Flushed {len(results)} pending update(s), resuming from {self.last_update_id}")
+            else:
+                print("[telegram] No pending updates to flush")
+        except Exception as e:
+            print(f"[telegram] Warning: could not flush updates: {e}")
 
     def _set_bot_commands(self):
         """Register the command menu in Telegram."""
