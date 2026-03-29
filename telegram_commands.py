@@ -356,7 +356,7 @@ class TelegramCommands:
     # ─── Scanner ─────────────────────────────────────────
 
     def _cmd_scan(self):
-        self._reply("🔍 <b>Escaneando mercados...</b>\n50 mercados × 500 trades c/u\nEsto puede tardar 3-5 minutos.")
+        self._reply("🔍 <b>Escaneando mercados...</b>\n15 mercados × 500 trades c/u\nEsto puede tardar 2-4 minutos.")
 
         # Run in a thread to not block command processing
         t = threading.Thread(target=self._run_scan, daemon=True)
@@ -408,8 +408,6 @@ class TelegramCommands:
                     f"💡 Para agregar la mejor:\n"
                     f"<code>/addwallet {top['address']} {name}</code>"
                 )
-
-            self._reply(text)
 
         except Exception as e:
             self._reply(f"🚨 Error en scan: <code>{e}</code>")
