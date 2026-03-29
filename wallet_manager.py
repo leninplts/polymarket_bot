@@ -41,7 +41,7 @@ def get_nickname(address: str) -> str:
 
 
 def add_wallet(address: str, nickname: str = "") -> bool:
-    """Add a wallet. Returns False if already exists."""
+    """Add a wallet in dry mode by default. Returns False if already exists."""
     wallets = _load()
     address = address.lower().strip()
 
@@ -53,10 +53,33 @@ def add_wallet(address: str, nickname: str = "") -> bool:
     wallets.append({
         "address": address,
         "nickname": nickname or "",
+        "mode": "dry",   # always starts in dry — must explicitly promote to demo/live
         "added_at": datetime.now().isoformat(),
     })
     _save(wallets)
     return True
+
+
+def get_mode(address: str) -> str:
+    """Return the mode for a wallet: 'dry', 'demo', or 'live'. Default 'dry'."""
+    for w in _load():
+        if w["address"].lower() == address.lower():
+            return w.get("mode", "dry")
+    return "dry"
+
+
+def set_mode(address: str, mode: str) -> bool:
+    """Set mode for a wallet. mode must be 'dry', 'demo', or 'live'."""
+    if mode not in ("dry", "demo", "live"):
+        return False
+    wallets = _load()
+    address = address.lower().strip()
+    for w in wallets:
+        if w["address"] == address:
+            w["mode"] = mode
+            _save(wallets)
+            return True
+    return False
 
 
 def remove_wallet(address: str) -> bool:

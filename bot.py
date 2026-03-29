@@ -26,6 +26,7 @@ import wallet_manager
 from wallet_monitor import WalletMonitor
 from trader import Trader
 from position_tracker import PositionTracker
+from demo_account import DemoAccount
 import market_cache
 import telegram_notifier as tg
 from telegram_commands import TelegramCommands
@@ -51,6 +52,7 @@ class CopyTradingBot:
         # Buffer for aggregating fragmented orders: key = (wallet, condition_id)
         # value = {first_trade, total_size, total_usdc, count, first_seen, last_seen, notified_first}
         self._trade_buffer: dict = {}
+        self.demo = DemoAccount(initial_balance=float(config.DEMO_BALANCE))
         self.commands = TelegramCommands(self)
         self.reliability = ReliabilityTracker()
 
@@ -149,58 +151,60 @@ class CopyTradingBot:
     def _try_scale(self, trade: dict, buf: dict, new_price: float):
         """
         Try to add to an existing position when the trader keeps buying the same market.
-
-        Rules:
-        1. We must already have the position open
-        2. Total invested in this market must be below MAX_POSITION_PCT * budget
-        3. If SCALE_ON_CONVICTION=true, new price must be >= our avg entry (price going up)
-           — avoids averaging down on losing positions
-        4. Not in dry_run (can't execute real trades)
+        Routes to demo or live depending on wallet mode.
         """
-        if self.dry_run:
+        wallet_addr = trade.get("wallet", "")
+        mode = wallet_manager.get_mode(wallet_addr) if not self.dry_run else "dry"
+
+        if mode == "dry":
             return
 
         token_id = trade.get("token_id", "")
         if not token_id:
             return
 
-        pos = self.positions.get_position(token_id)
-        if not pos:
-            return  # We don't have this position, normal entry already handled
-
-        # Budget cap: FIXED_AMOUNT * 10 is our assumed total budget for sizing
-        total_budget = config.FIXED_AMOUNT * 10
-        max_per_market = total_budget * config.MAX_POSITION_PCT
-        already_invested = self.positions.get_invested(token_id)
-
-        if already_invested >= max_per_market:
-            print(
-                f"  [scale] Skipped — already at max position "
-                f"(${already_invested:.2f} >= ${max_per_market:.2f})"
-            )
-            return
-
-        # Conviction check: only scale if price is going up
-        if config.SCALE_ON_CONVICTION and new_price < pos["entry_price"]:
-            print(
-                f"  [scale] Skipped — price going down "
-                f"({new_price:.3f} < entry {pos['entry_price']:.3f}), "
-                f"not averaging down"
-            )
-            return
-
-        # Calculate how much more we can add without exceeding the cap
-        room = max_per_market - already_invested
-        scale_size = self.trader._calculate_size(trade.get("size", 0), new_price)
-        scale_size = min(scale_size, room / max(new_price, 0.01))  # cap to remaining room
-        scale_size = round(scale_size, 2)
-
-        if scale_size < 1:
-            return  # Too small to bother
-
         market_name = buf["market_name"]
         slug = buf["slug"]
         event_slug = buf["event_slug"]
+        nick = wallet_manager.get_nickname(wallet_addr)
+        total_budget = config.FIXED_AMOUNT * 10
+        max_per_market = total_budget * config.MAX_POSITION_PCT
+
+        # ── DEMO scale ────────────────────────────────────────────────────────
+        if mode == "demo":
+            updated = self.demo.scale(token_id, new_price)
+            if updated:
+                self.stats["trades_copied"] += 1
+                invested_now = updated["cost"]
+                print(
+                    f"  [demo scale] +${updated['size'] * new_price:.2f} @ {new_price:.3f} | "
+                    f"avg={updated['entry_price']:.3f} | total=${invested_now:.2f}"
+                )
+                tg.notify_demo_scaled(
+                    nick, market_name, new_price,
+                    updated["entry_price"], invested_now, max_per_market,
+                    self.demo.balance, slug, event_slug,
+                )
+            return
+
+        # ── LIVE scale ────────────────────────────────────────────────────────
+        pos = self.positions.get_position(token_id)
+        if not pos:
+            return
+
+        already_invested = self.positions.get_invested(token_id)
+        if already_invested >= max_per_market:
+            return
+
+        if config.SCALE_ON_CONVICTION and new_price < pos["entry_price"]:
+            return
+
+        room = max_per_market - already_invested
+        scale_size = self.trader._calculate_size(trade.get("size", 0), new_price)
+        scale_size = min(scale_size, room / max(new_price, 0.01))
+        scale_size = round(scale_size, 2)
+        if scale_size < 1:
+            return
 
         result = self.trader.execute_copy_trade({**trade, "size": scale_size})
         if result:
@@ -209,19 +213,11 @@ class CopyTradingBot:
             new_avg = updated["entry_price"] if updated else new_price
             new_total = updated["size"] if updated else pos["size"] + scale_size
             invested_now = new_total * new_avg
-
-            print(
-                f"  [scale] SCALED +${scale_size * new_price:.2f} @ {new_price:.3f} | "
-                f"avg entry now {new_avg:.3f} | total invested ${invested_now:.2f}"
-            )
+            print(f"  [scale] SCALED +${scale_size * new_price:.2f} @ {new_price:.3f}")
             tg.notify_trade_scaled(
-                wallet_manager.get_nickname(trade.get("wallet", "")),
-                market_name, scale_size, new_price, new_avg,
-                invested_now, max_per_market,
-                slug, event_slug,
+                nick, market_name, scale_size, new_price, new_avg,
+                invested_now, max_per_market, slug, event_slug,
             )
-        else:
-            print(f"  [scale] Scale order failed for {market_name}")
 
     def _flush_trade_buffers(self):
         """
@@ -257,32 +253,55 @@ class CopyTradingBot:
             del self._trade_buffer[k]
 
     def _execute_buy(self, trade: dict, market_name: str, slug: str, event_slug: str):
-        """Execute a BUY — shared logic for buffered and direct entries."""
+        """Execute a BUY — routes to dry / demo / live based on wallet mode."""
         token_id = trade.get("token_id", "")
+        wallet_addr = trade.get("wallet", "")
+        price = float(trade.get("price", 0))
 
-        if self.reliability.is_wallet_paused(trade.get("wallet", "")):
+        if self.reliability.is_wallet_paused(wallet_addr):
             print("  Action:  SKIPPED (trader paused - bad performance)")
             self.stats["trades_skipped"] += 1
             tg.notify_trade_skipped(trade, market_name, "Trader pausado por mal rendimiento", slug, event_slug)
             return
 
-        if self.dry_run:
+        # Determine effective mode:
+        # global dry_run overrides everything (emergency brake)
+        mode = wallet_manager.get_mode(wallet_addr) if not self.dry_run else "dry"
+
+        # ── DRY ──────────────────────────────────────────────────────────────
+        if mode == "dry":
             print("  Action:  SKIPPED (dry run)")
             self.stats["trades_skipped"] += 1
             skip_num = tg.get_skip_counter() + 1
-            tg.notify_trade_skipped(trade, market_name, "Modo dry-run activo", slug, event_slug)
+            tg.notify_trade_skipped(trade, market_name, "Modo dry-run", slug, event_slug)
             self.skipped_trades.append({
-                "skip_number": skip_num,
-                "trade": trade,
-                "market_name": market_name,
-                "slug": slug,
-                "event_slug": event_slug,
-                "entry_price": trade.get("price", 0),
-                "token_id": token_id,
-                "timestamp": time.time(),
+                "skip_number": skip_num, "trade": trade,
+                "market_name": market_name, "slug": slug, "event_slug": event_slug,
+                "entry_price": price, "token_id": token_id, "timestamp": time.time(),
             })
             return
 
+        # ── DEMO ─────────────────────────────────────────────────────────────
+        if mode == "demo":
+            if self.demo.has_position(token_id):
+                print("  Action:  SKIPPED demo (ya tenemos posicion)")
+                return
+            pos = self.demo.buy(
+                token_id=token_id, price=price,
+                market_name=market_name, slug=slug, event_slug=event_slug,
+                source_wallet=wallet_addr,
+            )
+            if pos:
+                self.stats["trades_copied"] += 1
+                cost = pos["cost"]
+                print(f"  Action:  DEMO BUY ${cost:.2f} @ {price} | balance: ${self.demo.balance:.2f}")
+                tg.notify_demo_buy(trade, market_name, cost, price, self.demo.balance, slug, event_slug)
+                self.reliability.record_trade(token_id, "BUY", price, wallet_addr)
+            else:
+                print(f"  Action:  DEMO SKIPPED (saldo insuficiente o mercado resuelto)")
+            return
+
+        # ── LIVE ─────────────────────────────────────────────────────────────
         if self.positions.has_position(token_id):
             print("  Action:  SKIPPED (already have this position)")
             self.stats["trades_skipped"] += 1
@@ -292,7 +311,6 @@ class CopyTradingBot:
         result = self.trader.execute_copy_trade(trade)
         if result:
             self.stats["trades_copied"] += 1
-            price = trade.get("price", 0)
             our_size = self.trader._calculate_size(trade.get("size", 0), price)
             print(f"  Action:  COPIED -> {result}")
             tg.notify_trade_copied(
@@ -304,40 +322,46 @@ class CopyTradingBot:
                 token_id=token_id, side="BUY", size=our_size,
                 entry_price=price, market_name=market_name,
                 slug=slug, event_slug=event_slug,
-                source_wallet=trade.get("wallet", ""),
+                source_wallet=wallet_addr,
             )
-            self.reliability.record_trade(token_id, "BUY", price, trade.get("wallet", ""))
+            self.reliability.record_trade(token_id, "BUY", price, wallet_addr)
         else:
             self.stats["trades_skipped"] += 1
             skip_num = tg.get_skip_counter() + 1
             print("  Action:  SKIPPED (failed or filtered)")
             tg.notify_trade_skipped(trade, market_name, "Orden fallida o filtrada por slippage", slug, event_slug)
             self.skipped_trades.append({
-                "skip_number": skip_num,
-                "trade": trade,
-                "market_name": market_name,
-                "slug": slug,
-                "event_slug": event_slug,
-                "entry_price": trade.get("price", 0),
-                "token_id": token_id,
-                "timestamp": time.time(),
+                "skip_number": skip_num, "trade": trade,
+                "market_name": market_name, "slug": slug, "event_slug": event_slug,
+                "entry_price": price, "token_id": token_id, "timestamp": time.time(),
             })
 
     def _handle_exit(self, trade: dict, market_name: str, slug: str, event_slug: str):
-        """Trader is selling — copy the exit."""
+        """Trader is selling — copy the exit in the appropriate mode."""
         token_id = trade.get("token_id", "")
-        exit_price = trade.get("price", 0)
+        exit_price = float(trade.get("price", 0))
+        wallet_addr = trade.get("wallet", "")
+        mode = wallet_manager.get_mode(wallet_addr) if not self.dry_run else "dry"
 
-        print(f"  EXIT DETECTED — trader is selling")
+        print(f"  EXIT DETECTED — trader is selling [{mode.upper()}]")
 
-        if self.dry_run:
+        # ── DRY ──────────────────────────────────────────────────────────────
+        if mode == "dry":
             print("  Action:  EXIT SKIPPED (dry run)")
-            pos = self.positions.close_position(token_id, exit_price, "trader_exit_dry")
-            if pos:
-                tg.notify_position_closed(pos, exit_price, "Trader vendio (dry-run, no ejecutado)", slug, event_slug)
             return
 
-        # Find our position to know the size
+        # ── DEMO ─────────────────────────────────────────────────────────────
+        if mode == "demo":
+            if not self.demo.has_position(token_id):
+                return
+            closed = self.demo.sell(token_id, exit_price, "trader_exit")
+            if closed:
+                self.stats["exits_copied"] += 1
+                print(f"  Action:  DEMO EXIT — PnL: ${closed.get('pnl', 0):.2f} | balance: ${self.demo.balance:.2f}")
+                tg.notify_demo_closed(closed, exit_price, "Trader vendio — salida demo", self.demo.balance, slug, event_slug)
+            return
+
+        # ── LIVE ─────────────────────────────────────────────────────────────
         open_pos = self.positions.get_open_positions()
         our_pos = next((p for p in open_pos if p["token_id"] == token_id), None)
         if not our_pos:
@@ -402,6 +426,38 @@ class CopyTradingBot:
                         "Mercado resuelto a NO (perdimos)",
                         pos.get("slug", ""), pos.get("event_slug", ""),
                     )
+
+    def _check_demo_stop_losses(self):
+        """Check demo positions for stop-loss triggers."""
+        for item in self.demo.check_stop_losses():
+            pos = item["position"]
+            current_price = item["current_price"]
+            loss_pct = item["loss_pct"]
+            closed = self.demo.sell(pos["token_id"], current_price, "stop_loss")
+            if closed:
+                print(f"\n[demo stop-loss] {pos['market_name']} — {loss_pct:.0%} | balance: ${self.demo.balance:.2f}")
+                tg.notify_demo_closed(
+                    closed, current_price,
+                    f"Stop-loss demo ({loss_pct:.0%} perdida)",
+                    self.demo.balance,
+                    pos.get("slug", ""), pos.get("event_slug", ""),
+                )
+
+    def _check_demo_resolutions(self):
+        """Check demo positions where the market has resolved."""
+        for item in self.demo.check_resolutions():
+            pos = item["position"]
+            current_price = item["current_price"]
+            outcome = item["outcome"]
+            reason = f"Mercado resuelto a {outcome} ({'ganamos' if outcome == 'YES' else 'perdimos'}) — demo"
+            closed = self.demo.sell(pos["token_id"], current_price, f"market_resolved_{outcome.lower()}")
+            if closed:
+                print(f"\n[demo resolved] {pos['market_name']} — {outcome} | PnL: ${closed.get('pnl',0):.2f}")
+                tg.notify_demo_closed(
+                    closed, current_price, reason,
+                    self.demo.balance,
+                    pos.get("slug", ""), pos.get("event_slug", ""),
+                )
 
     def _check_stop_losses(self):
         """Periodically check positions for stop-loss triggers."""
@@ -532,6 +588,8 @@ class CopyTradingBot:
                 self._flush_trade_buffers()
                 self._check_stop_losses()
                 self._check_market_resolutions()
+                self._check_demo_stop_losses()
+                self._check_demo_resolutions()
                 self._check_skipped_outcomes()
                 self._send_periodic_summary()
                 self.reliability.check_reliability()

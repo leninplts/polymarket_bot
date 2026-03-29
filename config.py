@@ -18,6 +18,8 @@ PROPORTIONAL_FACTOR = float(os.getenv("PROPORTIONAL_FACTOR", "0.1"))
 MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.20"))  # 20% of total budget per market
 SCALE_ON_CONVICTION = os.getenv("SCALE_ON_CONVICTION", "true").lower() == "true"
 
+DEMO_BALANCE = float(os.getenv("DEMO_BALANCE", "100.0"))  # Starting balance for demo mode
+
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 MAX_SLIPPAGE = float(os.getenv("MAX_SLIPPAGE", "0.02"))
 

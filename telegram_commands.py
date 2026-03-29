@@ -33,18 +33,21 @@ class TelegramCommands:
             requests.post(
                 f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/setMyCommands",
                 json={"commands": [
-                    {"command": "status", "description": "Ver estado del bot y stats"},
-                    {"command": "live", "description": "Cambiar a modo LIVE (trades reales)"},
-                    {"command": "dryrun", "description": "Cambiar a modo DRY RUN"},
+                    {"command": "status", "description": "Estado del bot"},
+                    {"command": "dryrun", "description": "/dryrun nombre — Solo observar"},
+                    {"command": "demo", "description": "/demo nombre — Cuenta demo virtual"},
+                    {"command": "live", "description": "/live nombre — Trades reales"},
                     {"command": "pause", "description": "Pausar el bot"},
                     {"command": "resume", "description": "Reanudar el bot"},
-                    {"command": "wallets", "description": "Ver wallets que copiamos"},
-                    {"command": "addwallet", "description": "Agregar: /addwallet 0x... o /addwallet nombre"},
-                    {"command": "removewallet", "description": "Quitar: /removewallet 0x... o /removewallet nombre"},
+                    {"command": "wallets", "description": "Ver wallets y sus modos"},
+                    {"command": "addwallet", "description": "Agregar wallet (entra en dry)"},
+                    {"command": "removewallet", "description": "Quitar wallet"},
                     {"command": "pausewallet", "description": "Pausar wallet: /pausewallet nombre"},
                     {"command": "resumewallet", "description": "Reanudar wallet: /resumewallet nombre"},
+                    {"command": "demobalance", "description": "Ver cuenta demo (balance, PnL)"},
+                    {"command": "demoreset", "description": "Reiniciar cuenta demo"},
                     {"command": "pnl", "description": "Ver PnL de traders"},
-                    {"command": "portfolio", "description": "Ver nuestras posiciones abiertas"},
+                    {"command": "portfolio", "description": "Ver posiciones reales abiertas"},
                     {"command": "scan", "description": "Buscar nuevas wallets rentables"},
                     {"command": "stop", "description": "Detener el bot"},
                 ]},
@@ -99,9 +102,11 @@ class TelegramCommands:
         if cmd == "/status":
             self._cmd_status()
         elif cmd == "/live":
-            self._cmd_live()
+            self._cmd_set_mode(args, "live")
+        elif cmd == "/demo":
+            self._cmd_set_mode(args, "demo")
         elif cmd == "/dryrun":
-            self._cmd_dryrun()
+            self._cmd_set_mode(args, "dry")
         elif cmd == "/pause":
             self._cmd_pause()
         elif cmd == "/resume":
@@ -116,6 +121,10 @@ class TelegramCommands:
             self._cmd_pause_wallet(args)
         elif cmd == "/resumewallet":
             self._cmd_resume_wallet(args)
+        elif cmd == "/demobalance":
+            self._cmd_demo_balance()
+        elif cmd == "/demoreset":
+            self._cmd_demo_reset(args)
         elif cmd == "/pnl":
             self._cmd_pnl()
         elif cmd == "/portfolio":
@@ -129,53 +138,108 @@ class TelegramCommands:
                 "🤖 <b>Polymarket Copy-Trading Bot</b>\n\n"
                 "<b>Control:</b>\n"
                 "/status — Estado del bot\n"
-                "/live — Modo LIVE\n"
-                "/dryrun — Modo DRY RUN\n"
-                "/pause — Pausar\n"
-                "/resume — Reanudar\n"
-                "/stop — Detener\n\n"
+                "/pause — Pausar bot\n"
+                "/resume — Reanudar bot\n"
+                "/stop — Detener bot\n\n"
+                "<b>Modos por wallet:</b>\n"
+                "/dryrun RN1 — Solo observar\n"
+                "/demo RN1 — Cuenta demo virtual\n"
+                "/live RN1 — Trades reales\n\n"
                 "<b>Wallets:</b>\n"
-                "/wallets — Ver wallets activas\n"
-                "/addwallet nombre — Agregar\n"
+                "/wallets — Ver wallets y sus modos\n"
+                "/addwallet nombre — Agregar (entra en dry)\n"
                 "/removewallet nombre — Quitar\n"
                 "/pausewallet nombre — Pausar wallet\n"
-                "/resumewallet nombre — Reanudar wallet\n"
-                "/pnl — Ver PnL\n"
-                "/portfolio — Nuestras posiciones\n"
+                "/resumewallet nombre — Reanudar wallet\n\n"
+                "<b>Demo:</b>\n"
+                "/demobalance — Ver cuenta demo\n"
+                "/demoreset — Reiniciar cuenta demo\n\n"
+                "<b>Analisis:</b>\n"
+                "/pnl — PnL de traders\n"
+                "/portfolio — Posiciones reales abiertas\n"
                 "/scan — Buscar wallets rentables"
             )
 
     # ─── Bot control ─────────────────────────────────────
 
     def _cmd_status(self):
-        mode = "🔬 DRY RUN" if self.bot.dry_run else "⚡ LIVE"
+        global_mode = "🔬 OVERRIDE DRY" if self.bot.dry_run else "✅ Normal"
         state = "⏸ PAUSADO" if not self.bot.running else "▶️ ACTIVO"
         s = self.bot.stats
         all_wallets = wallet_manager.get_all()
         manually_paused = sum(1 for w in all_wallets if wallet_manager.is_paused(w["address"]))
         auto_paused = len(self.bot.reliability.paused_wallets)
-        active = len(all_wallets) - manually_paused
+        n_dry  = sum(1 for w in all_wallets if wallet_manager.get_mode(w["address"]) == "dry")
+        n_demo = sum(1 for w in all_wallets if wallet_manager.get_mode(w["address"]) == "demo")
+        n_live = sum(1 for w in all_wallets if wallet_manager.get_mode(w["address"]) == "live")
+
+        demo_s = self.bot.demo.get_summary()
+        demo_pnl = demo_s["total_pnl"]
+        demo_str = f"+${demo_pnl:,.2f}" if demo_pnl >= 0 else f"-${abs(demo_pnl):,.2f}"
 
         self._reply(
             f"{'━' * 28}\n"
             f"📊 <b>ESTADO DEL BOT</b>\n"
             f"{'━' * 28}\n\n"
-            f"Modo: {mode}\n"
-            f"Estado: {state}\n"
-            f"Wallets activas: <b>{active}</b> / {len(all_wallets)}\n"
-            f"Pausadas manualmente: {manually_paused}\n"
-            f"Pausadas (rendimiento): {auto_paused}\n\n"
-            f"Trades detectados: <b>{s.get('trades_detected', 0)}</b>\n"
-            f"Trades copiados: <b>{s.get('trades_copied', 0)}</b>\n"
-            f"Trades saltados: <b>{s.get('trades_skipped', 0)}</b>"
+            f"Override global: {global_mode}\n"
+            f"Estado: {state}\n\n"
+            f"<b>Wallets ({len(all_wallets)}):</b>\n"
+            f"  🔬 Dry:  {n_dry}\n"
+            f"  🎮 Demo: {n_demo}\n"
+            f"  ⚡ Live: {n_live}\n"
+            f"  ⏸ Pausadas: {manually_paused + auto_paused}\n\n"
+            f"<b>Cuenta demo:</b>\n"
+            f"  Balance: ${demo_s['balance']:,.2f} | PnL: {demo_str}\n\n"
+            f"<b>Trades:</b>\n"
+            f"  Detectados: <b>{s.get('trades_detected', 0)}</b>\n"
+            f"  Copiados:   <b>{s.get('trades_copied', 0)}</b>\n"
+            f"  Saltados:   <b>{s.get('trades_skipped', 0)}</b>"
         )
 
-    def _cmd_live(self):
-        if not self.bot.dry_run:
-            self._reply("⚡ Ya estás en modo <b>LIVE</b>")
+    def _cmd_set_mode(self, args: list[str], mode: str):
+        """
+        Set mode for a specific wallet or for the global bot override.
+        /live RN1    -> RN1 goes live
+        /demo RN1    -> RN1 goes demo
+        /dryrun RN1  -> RN1 goes dry
+        /live        -> (no args) global live override (legacy)
+        /dryrun      -> (no args) global dry override
+        """
+        mode_labels = {
+            "dry":  ("🔬", "DRY RUN",  "Solo observando, sin ejecutar nada."),
+            "demo": ("🎮", "DEMO",     f"Cuenta virtual de ${config.DEMO_BALANCE:.0f}."),
+            "live": ("⚡", "LIVE",     f"Trades reales. Max ${config.FIXED_AMOUNT}/orden."),
+        }
+        emoji, label, desc = mode_labels[mode]
+
+        # No args = global override (legacy behavior)
+        if not args:
+            if mode == "live":
+                if not self.bot.dry_run:
+                    self._reply(f"{emoji} Ya estas en modo global <b>{label}</b>")
+                    return
+                if self.bot.trader is None:
+                    try:
+                        from trader import Trader
+                        self.bot.trader = Trader()
+                    except Exception as e:
+                        self._reply(f"🚨 Error al inicializar trader: <code>{e}</code>")
+                        return
+                self.bot.dry_run = False
+                self._reply(f"{emoji} <b>OVERRIDE GLOBAL: {label}</b>\n\n{desc}\n\n⚠️ Aun asi cada wallet necesita estar en modo live individualmente.")
+            else:
+                self.bot.dry_run = True
+                self._reply(f"{emoji} <b>OVERRIDE GLOBAL: {label}</b>\n\n{desc}\n\nTodas las wallets quedan bloqueadas en dry hasta que desactives el override.")
             return
 
-        if self.bot.trader is None:
+        # With args = set mode for specific wallet
+        address, nickname = self._resolve_monitored_wallet(args)
+        if not address:
+            self._reply(f"⚠️ No se encontro <b>{' '.join(args)}</b> en las wallets monitoreadas.")
+            return
+
+        # For live mode, ensure Trader is initialized
+        if mode == "live" and self.bot.trader is None:
             try:
                 from trader import Trader
                 self.bot.trader = Trader()
@@ -183,19 +247,71 @@ class TelegramCommands:
                 self._reply(f"🚨 Error al inicializar trader: <code>{e}</code>")
                 return
 
-        self.bot.dry_run = False
+        wallet_manager.set_mode(address, mode)
+
         self._reply(
-            "⚡ <b>MODO LIVE ACTIVADO</b>\n\n"
-            "⚠️ Trades reales a partir de ahora.\n"
-            f"Max size: ${config.FIXED_AMOUNT} (dinamico por probabilidad)"
+            f"{'━' * 28}\n"
+            f"{emoji} <b>MODO {label}</b>\n"
+            f"{'━' * 28}\n\n"
+            f"👤 <b>{nickname}</b>\n"
+            f"<code>{address}</code>\n\n"
+            f"{desc}"
         )
 
-    def _cmd_dryrun(self):
-        if self.bot.dry_run:
-            self._reply("🔬 Ya estás en modo <b>DRY RUN</b>")
-            return
-        self.bot.dry_run = True
-        self._reply("🔬 <b>MODO DRY RUN ACTIVADO</b>\n\nSolo observando.")
+    def _cmd_demo_balance(self):
+        """Show demo account summary."""
+        s = self.bot.demo.get_summary()
+        pnl = s["total_pnl"]
+        pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+        ret_str = f"+{s['total_return_pct']:.1f}%" if s['total_return_pct'] >= 0 else f"{s['total_return_pct']:.1f}%"
+        emoji = "📈" if pnl >= 0 else "📉"
+
+        text = (
+            f"{'━' * 28}\n"
+            f"🎮 <b>CUENTA DEMO</b>\n"
+            f"{'━' * 28}\n\n"
+            f"💰 Balance disponible: <b>${s['balance']:,.2f}</b>\n"
+            f"📊 En posiciones: ${s['in_positions']:,.2f}\n"
+            f"🏦 Capital inicial: ${s['initial_balance']:,.2f}\n\n"
+            f"{emoji} PnL realizado: <b>${s['realized_pnl']:,.2f}</b>\n"
+            f"{emoji} PnL no realizado: <b>${s['unrealized_pnl']:,.2f}</b>\n"
+            f"{'━' * 20}\n"
+            f"{emoji} PnL total: <b>{pnl_str}</b> ({ret_str})\n"
+        )
+
+        if s["positions"]:
+            text += f"\n📋 <b>Posiciones abiertas ({s['open_count']}):</b>\n"
+            for p in s["positions"][:8]:
+                from find_wallets import format_wallet_summary
+                pnl_p = p['pnl']
+                em = "✅" if pnl_p >= 0 else "❌"
+                nick = wallet_manager.get_nickname(p.get("source_wallet", ""))
+                market = p["market_name"][:30]
+                slug = p.get("slug", "")
+                link = f'<a href="https://polymarket.com/market/{slug}">{market}</a>' if slug else market
+                text += (
+                    f"  {em} {link}\n"
+                    f"      entrada={p['entry_price']:.3f} actual={p['current_price']:.3f} "
+                    f"PnL=<b>${pnl_p:,.2f}</b> ({p['pnl_pct']:+.1f}%) [{nick}]\n"
+                )
+
+        if s["closed_count"] > 0:
+            text += f"\n✔️ Posiciones cerradas: {s['closed_count']}"
+
+        self._reply(text)
+
+    def _cmd_demo_reset(self, args: list[str]):
+        """Reset the demo account."""
+        import config as _cfg
+        balance = float(args[0]) if args else _cfg.DEMO_BALANCE
+        self.bot.demo.reset(balance)
+        self._reply(
+            f"{'━' * 28}\n"
+            f"🎮 <b>CUENTA DEMO REINICIADA</b>\n"
+            f"{'━' * 28}\n\n"
+            f"💰 Nuevo balance: <b>${balance:,.2f}</b>\n"
+            f"Todas las posiciones demo han sido borradas."
+        )
 
     def _cmd_pause(self):
         if not self.bot.running:
@@ -224,18 +340,23 @@ class TelegramCommands:
             self._reply("No hay wallets configuradas. Usa /addwallet o /scan")
             return
 
+        mode_icons = {"dry": "🔬", "demo": "🎮", "live": "⚡"}
         lines = []
         for w in wallets:
             addr = w["address"]
             nick = w.get("nickname") or f"{addr[:10]}...{addr[-6:]}"
             manually_paused = wallet_manager.is_paused(addr)
             auto_paused = self.bot.reliability.is_wallet_paused(addr)
+            wmode = wallet_manager.get_mode(addr)
+            mode_icon = mode_icons.get(wmode, "🔬")
+
             if manually_paused:
-                status = " ⏸ <i>pausada manualmente</i>"
+                status = f" {mode_icon} [<b>{wmode.upper()}</b>] ⏸ <i>pausada</i>"
             elif auto_paused:
-                status = " ⚠️ <i>pausada (bajo rendimiento)</i>"
+                status = f" {mode_icon} [<b>{wmode.upper()}</b>] ⚠️ <i>bajo rendimiento</i>"
             else:
-                status = " ✅"
+                status = f" {mode_icon} [<b>{wmode.upper()}</b>]"
+
             lines.append(
                 f'  └ <b>{nick}</b>{status}\n'
                 f'      <a href="https://polymarket.com/profile/{addr}">{addr[:10]}...{addr[-6:]}</a>'

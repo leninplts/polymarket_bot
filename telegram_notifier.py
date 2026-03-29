@@ -356,6 +356,80 @@ def notify_trade_scaled(nickname: str, market_name: str, extra_size: float,
     )
 
 
+# ─── DEMO NOTIFICATIONS ─────────────────────────────────
+
+def notify_demo_buy(trade: dict, market_name: str, cost: float, price: float,
+                    balance: float, slug: str = None, event_slug: str = None):
+    wallet = trade.get("wallet", "")
+    market_display = _market_link(market_name, slug, event_slug)
+    outcome = trade.get("outcome", "?")
+    _send(
+        f"{'━' * 28}\n"
+        f"🎮 <b>DEMO — COMPRA</b>\n"
+        f"{'━' * 28}\n\n"
+        f"👤 {_trader_link(wallet)}\n"
+        f"📌 {market_display}\n\n"
+        f"    💵 Invertido: <b>${cost:,.2f}</b> @ {price:.3f}\n"
+        f"    📍 Outcome: <b>{outcome}</b>\n"
+        f"    🏦 Balance restante: <b>${balance:,.2f}</b>"
+    )
+
+
+def notify_demo_scaled(nickname: str, market_name: str, new_price: float,
+                       avg_entry: float, total_invested: float, max_allowed: float,
+                       balance: float, slug: str = None, event_slug: str = None):
+    market_display = _market_link(market_name, slug, event_slug)
+    pct_used = round(total_invested / max_allowed * 100) if max_allowed > 0 else 0
+    bar = "🟦" * min(pct_used // 10, 10) + "⬜" * max(10 - pct_used // 10, 0)
+    _send(
+        f"{'━' * 28}\n"
+        f"🎮 <b>DEMO — ESCALADA</b>\n"
+        f"{'━' * 28}\n\n"
+        f"👤 <b>{nickname}</b>\n"
+        f"📌 {market_display}\n\n"
+        f"    🎯 Precio actual: {new_price:.3f}\n"
+        f"    📊 Precio promedio: {avg_entry:.3f}\n"
+        f"    💵 Total en posicion: <b>${total_invested:,.2f}</b> / ${max_allowed:,.2f}\n"
+        f"    {bar} {pct_used}%\n"
+        f"    🏦 Balance: <b>${balance:,.2f}</b>"
+    )
+
+
+def notify_demo_closed(position: dict, exit_price: float, reason: str,
+                       balance: float, slug: str = None, event_slug: str = None):
+    market_name = position.get("market_name", "Unknown")
+    market_display = _market_link(market_name, slug, event_slug)
+    entry_price = position.get("entry_price", 0)
+    pnl = position.get("pnl", 0)
+    cost = position.get("cost", 0)
+    pnl_pct = round((exit_price - entry_price) / entry_price * 100, 1) if entry_price > 0 else 0
+    emoji = "💰" if pnl >= 0 else "💸"
+    header = "DEMO — GANANCIA" if pnl >= 0 else "DEMO — PERDIDA"
+
+    opened = position.get("opened_at", 0)
+    closed_at = position.get("closed_at", 0)
+    if opened and closed_at:
+        duration_min = (closed_at - opened) / 60
+        duration = f"{duration_min:.0f}min" if duration_min < 60 else f"{duration_min/60:.1f}h"
+    else:
+        duration = "?"
+
+    source = position.get("source_wallet", "")
+    _send(
+        f"{'━' * 28}\n"
+        f"🎮 {emoji} <b>{header}</b>\n"
+        f"{'━' * 28}\n\n"
+        f"📌 {market_display}\n\n"
+        f"    Entrada: {entry_price:.3f} → Salida: {exit_price:.3f}\n"
+        f"    Invertido: ${cost:,.2f}\n"
+        f"    PnL: <b>${pnl:,.2f}</b> ({pnl_pct:+.1f}%)\n"
+        f"    Duracion: {duration}\n"
+        f"    📋 {reason}\n\n"
+        f"    🏦 Balance demo: <b>${balance:,.2f}</b>"
+        + (f"\n    👤 {_trader_link(source)}" if source else "")
+    )
+
+
 # ─── TRADE BUFFER SUMMARY ───────────────────────────────
 
 def notify_trade_buffer_summary(nickname: str, market_name: str, count: int,
