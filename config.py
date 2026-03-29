@@ -8,7 +8,7 @@ PRIVATE_KEY = os.environ["PRIVATE_KEY"]
 TARGET_WALLETS = [w.strip().lower() for w in os.environ["TARGET_WALLETS"].split(",") if w.strip()]
 
 SIZING_MODE = os.getenv("SIZING_MODE", "fixed")  # "fixed" or "proportional"
-FIXED_AMOUNT = float(os.getenv("FIXED_AMOUNT", "10"))
+FIXED_AMOUNT = float(os.getenv("FIXED_AMOUNT", "2"))
 PROPORTIONAL_FACTOR = float(os.getenv("PROPORTIONAL_FACTOR", "0.1"))
 
 # Scaling: follow the trader when they keep adding to the same position
