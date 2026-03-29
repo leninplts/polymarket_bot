@@ -363,25 +363,66 @@ class TelegramCommands:
         t.start()
 
     def _run_scan(self):
+        import time as _time
         try:
-            from find_wallets import get_top_markets, find_profitable_wallets, format_wallet_summary
+            from find_wallets import (
+                get_top_markets, _fetch_market_traders, scan_wallet,
+                format_wallet_summary, MIN_POSITIONS, MIN_PNL, MIN_WIN_RATE,
+                MIN_ROI, MAX_INACTIVE_DAYS, MIN_ACCOUNT_AGE_DAYS,
+                MARKET_WORKERS, WALLET_WORKERS,
+            )
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
+            # --- Fase 1: obtener mercados ---
+            self._reply("📡 <b>[1/4]</b> Obteniendo top 30 mercados por volumen...")
             markets = get_top_markets(30)
-            results = find_profitable_wallets(markets, quiet=True)
+            self._reply(f"✅ <b>[1/4]</b> {len(markets)} mercados obtenidos.")
+
+            # --- Fase 2: scraping de traders por mercado ---
+            self._reply(f"🕸 <b>[2/4]</b> Scrapeando traders en {len(markets)} mercados ({MARKET_WORKERS} en paralelo)...")
+            trader_addresses = set()
+            with ThreadPoolExecutor(max_workers=MARKET_WORKERS) as ex:
+                futures = {ex.submit(_fetch_market_traders, m, True): m for m in markets}
+                for fut in as_completed(futures):
+                    trader_addresses |= fut.result()
+            self._reply(f"✅ <b>[2/4]</b> {len(trader_addresses)} traders unicos encontrados.")
+
+            # --- Fase 3: analisis de wallets en paralelo ---
+            self._reply(f"🔬 <b>[3/4]</b> Analizando {len(trader_addresses)} wallets ({WALLET_WORKERS} en paralelo)...\nEsto tarda 1-2 min.")
+            results = []
+            addr_list = list(trader_addresses)
+            done = 0
+            total = len(addr_list)
+            with ThreadPoolExecutor(max_workers=WALLET_WORKERS) as ex:
+                futures = {ex.submit(scan_wallet, addr): addr for addr in addr_list}
+                for fut in as_completed(futures):
+                    done += 1
+                    stats = fut.result()
+                    if stats is None:
+                        continue
+                    if stats["days_since_last_trade"] > MAX_INACTIVE_DAYS:
+                        continue
+                    if stats["account_age_days"] > 0 and stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
+                        continue
+                    results.append(stats)
+            results.sort(key=lambda x: x["pnl"], reverse=True)
+            self._reply(f"✅ <b>[3/4]</b> Analisis completo: {done} wallets procesadas, <b>{len(results)} pasan filtros</b>.")
+
+            # --- Fase 4: enviar resultados ---
+            self._reply("📊 <b>[4/4]</b> Preparando resultados...")
 
             if not results:
                 self._reply(
-                    "🔍 <b>Scan completado</b>\n\n"
-                    "No se encontraron wallets que cumplan:\n"
-                    "  PnL>$500 | WR>55% | ROI>10% | 5+pos | Activo<7d | Cuenta>30d"
+                    "🔍 <b>Scan completado — sin resultados</b>\n\n"
+                    "Ninguna wallet cumple todos los criterios:\n"
+                    f"  PnL&gt;${MIN_PNL} | WR&gt;{MIN_WIN_RATE:.0%} | ROI&gt;{MIN_ROI}%\n"
+                    f"  {MIN_POSITIONS}+ pos | Activo&lt;{MAX_INACTIVE_DAYS}d | Cuenta&gt;{MIN_ACCOUNT_AGE_DAYS}d"
                 )
                 return
 
-            # Filter out wallets we already have
             current = set(wallet_manager.get_addresses())
             new_results = [r for r in results if r["address"] not in current]
 
-            # Send header
             self._reply(
                 f"{'━' * 28}\n"
                 f"🔍 <b>SCAN COMPLETADO</b>\n"
@@ -391,8 +432,6 @@ class TelegramCommands:
                 f"Ya monitoreadas: <b>{len(results) - len(new_results)}</b>"
             )
 
-            # Send wallets in batches of 3 to avoid message size limits
-            import time as _time
             for i in range(0, min(len(new_results), 10), 3):
                 batch = new_results[i:i + 3]
                 text = ""
@@ -410,4 +449,5 @@ class TelegramCommands:
                 )
 
         except Exception as e:
-            self._reply(f"🚨 Error en scan: <code>{e}</code>")
+            import traceback
+            self._reply(f"🚨 <b>Error en scan:</b>\n<code>{e}</code>\n\n<code>{traceback.format_exc()[-500:]}</code>")
