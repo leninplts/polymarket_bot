@@ -154,7 +154,11 @@ class CopyTradingBot:
         Routes to demo or live depending on wallet mode.
         """
         wallet_addr = trade.get("wallet", "")
-        mode = wallet_manager.get_mode(wallet_addr) if not self.dry_run else "dry"
+        wallet_mode = wallet_manager.get_mode(wallet_addr)
+        if self.dry_run and wallet_mode == "live":
+            mode = "dry"
+        else:
+            mode = wallet_mode
 
         if mode == "dry":
             return
@@ -265,8 +269,12 @@ class CopyTradingBot:
             return
 
         # Determine effective mode:
-        # global dry_run overrides everything (emergency brake)
-        mode = wallet_manager.get_mode(wallet_addr) if not self.dry_run else "dry"
+        # global dry_run only blocks LIVE (real money protection), demo always passes
+        wallet_mode = wallet_manager.get_mode(wallet_addr)
+        if self.dry_run and wallet_mode == "live":
+            mode = "dry"
+        else:
+            mode = wallet_mode
 
         # ── DRY ──────────────────────────────────────────────────────────────
         if mode == "dry":
@@ -341,7 +349,11 @@ class CopyTradingBot:
         token_id = trade.get("token_id", "")
         exit_price = float(trade.get("price", 0))
         wallet_addr = trade.get("wallet", "")
-        mode = wallet_manager.get_mode(wallet_addr) if not self.dry_run else "dry"
+        wallet_mode = wallet_manager.get_mode(wallet_addr)
+        if self.dry_run and wallet_mode == "live":
+            mode = "dry"
+        else:
+            mode = wallet_mode
 
         print(f"  EXIT DETECTED — trader is selling [{mode.upper()}]")
 

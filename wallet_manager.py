@@ -164,6 +164,7 @@ def init_from_config(addresses: list[str]):
         wallets.append({
             "address": addr.lower().strip(),
             "nickname": "",
+            "mode": "dry",
             "added_at": datetime.now().isoformat(),
         })
     _save(wallets)

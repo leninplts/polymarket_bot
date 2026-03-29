@@ -17,6 +17,10 @@ class TelegramCommands:
     def start(self):
         """Start polling for Telegram commands in a background thread."""
         if not config.TELEGRAM_BOT_TOKEN:
+            print("[telegram] WARNING: TELEGRAM_BOT_TOKEN no configurado — comandos deshabilitados")
+            return
+        if not config.TELEGRAM_CHAT_ID:
+            print("[telegram] WARNING: TELEGRAM_CHAT_ID no configurado — comandos deshabilitados")
             return
         self.running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
@@ -29,32 +33,35 @@ class TelegramCommands:
 
     def _set_bot_commands(self):
         """Register the command menu in Telegram."""
+        commands = [
+            {"command": "status", "description": "Estado del bot"},
+            {"command": "dryrun", "description": "/dryrun nombre — Solo observar"},
+            {"command": "demo", "description": "/demo nombre — Cuenta demo virtual"},
+            {"command": "live", "description": "/live nombre — Trades reales"},
+            {"command": "pause", "description": "Pausar el bot"},
+            {"command": "resume", "description": "Reanudar el bot"},
+            {"command": "wallets", "description": "Ver wallets y sus modos"},
+            {"command": "addwallet", "description": "Agregar wallet (entra en dry)"},
+            {"command": "removewallet", "description": "Quitar wallet"},
+            {"command": "pausewallet", "description": "Pausar wallet: /pausewallet nombre"},
+            {"command": "resumewallet", "description": "Reanudar wallet: /resumewallet nombre"},
+            {"command": "demobalance", "description": "Ver cuenta demo (balance, PnL)"},
+            {"command": "demoreset", "description": "Reiniciar cuenta demo"},
+            {"command": "pnl", "description": "Ver PnL de traders"},
+            {"command": "portfolio", "description": "Ver posiciones reales abiertas"},
+            {"command": "scan", "description": "Buscar nuevas wallets rentables"},
+            {"command": "stop", "description": "Detener el bot"},
+        ]
         try:
-            requests.post(
+            resp = requests.post(
                 f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/setMyCommands",
-                json={"commands": [
-                    {"command": "status", "description": "Estado del bot"},
-                    {"command": "dryrun", "description": "/dryrun nombre — Solo observar"},
-                    {"command": "demo", "description": "/demo nombre — Cuenta demo virtual"},
-                    {"command": "live", "description": "/live nombre — Trades reales"},
-                    {"command": "pause", "description": "Pausar el bot"},
-                    {"command": "resume", "description": "Reanudar el bot"},
-                    {"command": "wallets", "description": "Ver wallets y sus modos"},
-                    {"command": "addwallet", "description": "Agregar wallet (entra en dry)"},
-                    {"command": "removewallet", "description": "Quitar wallet"},
-                    {"command": "pausewallet", "description": "Pausar wallet: /pausewallet nombre"},
-                    {"command": "resumewallet", "description": "Reanudar wallet: /resumewallet nombre"},
-                    {"command": "demobalance", "description": "Ver cuenta demo (balance, PnL)"},
-                    {"command": "demoreset", "description": "Reiniciar cuenta demo"},
-                    {"command": "pnl", "description": "Ver PnL de traders"},
-                    {"command": "portfolio", "description": "Ver posiciones reales abiertas"},
-                    {"command": "scan", "description": "Buscar nuevas wallets rentables"},
-                    {"command": "stop", "description": "Detener el bot"},
-                ]},
+                json={"commands": commands},
                 timeout=10,
             )
-        except Exception:
-            pass
+            resp.raise_for_status()
+            print(f"[telegram] {len(commands)} comandos registrados OK")
+        except Exception as e:
+            print(f"[telegram] ERROR registrando comandos: {e}")
 
     def _reply(self, text: str):
         try:
