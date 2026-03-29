@@ -88,7 +88,7 @@ class DemoAccount:
         else:
             factor = 0.50
 
-        return round(max(1.0, max_amount * factor), 2)
+        return round(max(0.5, max_amount * factor), 2)
 
     # ── Fees ──────────────────────────────────────────────────────────────────
 
@@ -198,7 +198,7 @@ class DemoAccount:
         if not pos:
             return None
 
-        total_budget = config.FIXED_AMOUNT * 10
+        total_budget = config.TOTAL_BUDGET
         max_per_market = total_budget * config.MAX_POSITION_PCT
         already_invested = self.get_invested(token_id)
 

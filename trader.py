@@ -71,7 +71,7 @@ class Trader:
         else:
             factor = 0.50
 
-        return round(max(1, max_amount * factor), 2)
+        return round(max(0.5, max_amount * factor), 2)
 
     def _get_current_price(self, token_id: str, side: str) -> float | None:
         """Get the current best price for a token."""
