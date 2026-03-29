@@ -160,15 +160,15 @@ def notify_skipped_outcome(skip_number: int, trade: dict, market_name: str, entr
 
     if pnl_pct > 0:
         verdict = f"📈 Hubiera sido <b>GANANCIA</b> (+{pnl_pct:.1f}%)"
-        emoji = "😅"
+        emoji = "😅😅😅"
         comment = "Nos la perdimos"
     elif pnl_pct < 0:
         verdict = f"📉 Hubiera sido <b>PERDIDA</b> ({pnl_pct:.1f}%)"
-        emoji = "😌"
+        emoji = "😌😌😌"
         comment = "Buena decision saltarlo"
     else:
         verdict = "➡️ <b>Sin cambio</b>"
-        emoji = "😐"
+        emoji = "😐😐😐"
         comment = "Neutral"
 
     _send(
