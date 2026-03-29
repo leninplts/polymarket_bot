@@ -358,9 +358,12 @@ def format_wallet_summary(w: dict) -> str:
 
     trust_bar = "🟢" * min(trust, 5) + "⚪" * max(5 - trust, 0)
 
+    addr = w['address']
+    profile_url = f"https://polymarket.com/profile/{addr}"
+
     return (
-        f"👤 <b>{name}</b>  {trust_bar}\n"
-        f"    <code>{w['address']}</code>\n"
+        f"👤 <b><a href=\"{profile_url}\">{name}</a></b>  {trust_bar}\n"
+        f"    <code>{addr}</code>\n"
         f"    💰 PnL: <b>${w['pnl']:,.2f}</b> (ROI: {w['roi']}%)\n"
         f"    📊 WR: <b>{w['win_rate']:.0%}</b> ({w['wins']}W/{w['losses']}L)\n"
         f"    🏷 Especialidad: {specialist}\n"
