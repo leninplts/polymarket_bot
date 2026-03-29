@@ -25,7 +25,7 @@ DATA_API = "https://data-api.polymarket.com"
 # Filters
 MIN_PNL = 500
 MIN_WIN_RATE = 0.55
-MIN_POSITIONS = 10
+MIN_POSITIONS = 5
 MAX_INACTIVE_DAYS = 7
 MIN_ACCOUNT_AGE_DAYS = 30  # Minimum account age to filter out fresh "lucky" wallets
 
@@ -297,7 +297,8 @@ def find_profitable_wallets(markets: list[dict], quiet: bool = False) -> list[di
             # Apply remaining filters (account age + inactivity — need profile data)
             if stats["days_since_last_trade"] > MAX_INACTIVE_DAYS:
                 continue
-            if stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
+            # Only reject on age if we actually got the data (0 means API didn't return it)
+            if stats["account_age_days"] > 0 and stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
                 continue
             results.append(stats)
 

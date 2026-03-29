@@ -356,7 +356,7 @@ class TelegramCommands:
     # ─── Scanner ─────────────────────────────────────────
 
     def _cmd_scan(self):
-        self._reply("🔍 <b>Escaneando mercados...</b>\n15 mercados × 500 trades c/u\nEsto puede tardar 2-4 minutos.")
+        self._reply("🔍 <b>Escaneando mercados...</b>\n30 mercados × 500 trades c/u\nEsto puede tardar 3-5 minutos.")
 
         # Run in a thread to not block command processing
         t = threading.Thread(target=self._run_scan, daemon=True)
@@ -366,7 +366,7 @@ class TelegramCommands:
         try:
             from find_wallets import get_top_markets, find_profitable_wallets, format_wallet_summary
 
-            markets = get_top_markets(15)
+            markets = get_top_markets(30)
             results = find_profitable_wallets(markets, quiet=True)
 
             if not results:
