@@ -86,6 +86,50 @@ def set_nickname(address: str, nickname: str) -> bool:
     return False
 
 
+def pause_wallet(address: str) -> bool:
+    """Pause copying from a wallet. Returns False if not found."""
+    wallets = _load()
+    address = address.lower().strip()
+    for w in wallets:
+        if w["address"] == address:
+            if w.get("paused"):
+                return False  # already paused
+            w["paused"] = True
+            from datetime import datetime
+            w["paused_at"] = datetime.now().isoformat()
+            _save(wallets)
+            return True
+    return False
+
+
+def resume_wallet(address: str) -> bool:
+    """Resume copying from a wallet. Returns False if not found or not paused."""
+    wallets = _load()
+    address = address.lower().strip()
+    for w in wallets:
+        if w["address"] == address:
+            if not w.get("paused"):
+                return False  # not paused
+            w["paused"] = False
+            w.pop("paused_at", None)
+            _save(wallets)
+            return True
+    return False
+
+
+def is_paused(address: str) -> bool:
+    """Check if a wallet is manually paused."""
+    for w in _load():
+        if w["address"].lower() == address.lower():
+            return bool(w.get("paused", False))
+    return False
+
+
+def get_active_addresses() -> list[str]:
+    """Return only non-paused wallet addresses."""
+    return [w["address"].lower() for w in _load() if not w.get("paused", False)]
+
+
 def init_from_config(addresses: list[str]):
     """Initialize wallets.json from config if it doesn't exist yet."""
     if os.path.exists(WALLETS_FILE):

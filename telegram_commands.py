@@ -41,6 +41,8 @@ class TelegramCommands:
                     {"command": "wallets", "description": "Ver wallets que copiamos"},
                     {"command": "addwallet", "description": "Agregar: /addwallet 0x... o /addwallet nombre"},
                     {"command": "removewallet", "description": "Quitar: /removewallet 0x... o /removewallet nombre"},
+                    {"command": "pausewallet", "description": "Pausar wallet: /pausewallet nombre"},
+                    {"command": "resumewallet", "description": "Reanudar wallet: /resumewallet nombre"},
                     {"command": "pnl", "description": "Ver PnL de traders"},
                     {"command": "portfolio", "description": "Ver nuestras posiciones abiertas"},
                     {"command": "scan", "description": "Buscar nuevas wallets rentables"},
@@ -110,6 +112,10 @@ class TelegramCommands:
             self._cmd_add_wallet(args)
         elif cmd == "/removewallet":
             self._cmd_remove_wallet(args)
+        elif cmd == "/pausewallet":
+            self._cmd_pause_wallet(args)
+        elif cmd == "/resumewallet":
+            self._cmd_resume_wallet(args)
         elif cmd == "/pnl":
             self._cmd_pnl()
         elif cmd == "/portfolio":
@@ -130,8 +136,10 @@ class TelegramCommands:
                 "/stop — Detener\n\n"
                 "<b>Wallets:</b>\n"
                 "/wallets — Ver wallets activas\n"
-                "/addwallet 0x... nick — Agregar\n"
-                "/removewallet 0x... — Quitar\n"
+                "/addwallet nombre — Agregar\n"
+                "/removewallet nombre — Quitar\n"
+                "/pausewallet nombre — Pausar wallet\n"
+                "/resumewallet nombre — Reanudar wallet\n"
                 "/pnl — Ver PnL\n"
                 "/portfolio — Nuestras posiciones\n"
                 "/scan — Buscar wallets rentables"
@@ -143,7 +151,10 @@ class TelegramCommands:
         mode = "🔬 DRY RUN" if self.bot.dry_run else "⚡ LIVE"
         state = "⏸ PAUSADO" if not self.bot.running else "▶️ ACTIVO"
         s = self.bot.stats
-        paused_wallets = len(self.bot.reliability.paused_wallets)
+        all_wallets = wallet_manager.get_all()
+        manually_paused = sum(1 for w in all_wallets if wallet_manager.is_paused(w["address"]))
+        auto_paused = len(self.bot.reliability.paused_wallets)
+        active = len(all_wallets) - manually_paused
 
         self._reply(
             f"{'━' * 28}\n"
@@ -151,8 +162,9 @@ class TelegramCommands:
             f"{'━' * 28}\n\n"
             f"Modo: {mode}\n"
             f"Estado: {state}\n"
-            f"Wallets activas: {len(wallet_manager.get_all())}\n"
-            f"Wallets pausadas: {paused_wallets}\n\n"
+            f"Wallets activas: <b>{active}</b> / {len(all_wallets)}\n"
+            f"Pausadas manualmente: {manually_paused}\n"
+            f"Pausadas (rendimiento): {auto_paused}\n\n"
             f"Trades detectados: <b>{s.get('trades_detected', 0)}</b>\n"
             f"Trades copiados: <b>{s.get('trades_copied', 0)}</b>\n"
             f"Trades saltados: <b>{s.get('trades_skipped', 0)}</b>"
@@ -216,9 +228,16 @@ class TelegramCommands:
         for w in wallets:
             addr = w["address"]
             nick = w.get("nickname") or f"{addr[:10]}...{addr[-6:]}"
-            paused = " ⏸" if self.bot.reliability.is_wallet_paused(addr) else ""
+            manually_paused = wallet_manager.is_paused(addr)
+            auto_paused = self.bot.reliability.is_wallet_paused(addr)
+            if manually_paused:
+                status = " ⏸ <i>pausada manualmente</i>"
+            elif auto_paused:
+                status = " ⚠️ <i>pausada (bajo rendimiento)</i>"
+            else:
+                status = " ✅"
             lines.append(
-                f'  └ <b>{nick}</b>{paused}\n'
+                f'  └ <b>{nick}</b>{status}\n'
                 f'      <a href="https://polymarket.com/profile/{addr}">{addr[:10]}...{addr[-6:]}</a>'
             )
 
@@ -352,6 +371,77 @@ class TelegramCommands:
             )
         else:
             self._reply(f"⚠️ Wallet no encontrada.")
+
+    def _resolve_monitored_wallet(self, args: list[str]) -> tuple[str, str]:
+        """Resolve address+nickname from args (supports name or 0x address)."""
+        if not args:
+            return "", ""
+        first_arg = args[0]
+        if first_arg.startswith("0x"):
+            return first_arg.lower(), wallet_manager.get_nickname(first_arg)
+        # Search by name
+        name_query = " ".join(args).lower()
+        wallets = wallet_manager.get_all()
+        for w in wallets:
+            if w.get("nickname", "").lower() == name_query:
+                return w["address"], w.get("nickname") or w["address"][:12]
+        for w in wallets:
+            if name_query in w.get("nickname", "").lower():
+                return w["address"], w.get("nickname") or w["address"][:12]
+        return "", ""
+
+    def _cmd_pause_wallet(self, args: list[str]):
+        if not args:
+            self._reply(
+                "Uso: /pausewallet <b>nombre</b> o <b>0x...</b>\n\n"
+                "Ejemplo: <code>/pausewallet RN1</code>"
+            )
+            return
+
+        address, nickname = self._resolve_monitored_wallet(args)
+        if not address:
+            self._reply(f"⚠️ No se encontro <b>{' '.join(args)}</b> en las wallets monitoreadas.")
+            return
+
+        result = wallet_manager.pause_wallet(address)
+        if result:
+            self._reply(
+                f"{'━' * 28}\n"
+                f"⏸ <b>WALLET PAUSADA</b>\n"
+                f"{'━' * 28}\n\n"
+                f"👤 <b>{nickname}</b>\n"
+                f"<code>{address}</code>\n\n"
+                f"El bot dejara de copiar sus trades.\n"
+                f"Usa /resumewallet {nickname} para reanudar."
+            )
+        else:
+            self._reply(f"⚠️ <b>{nickname}</b> ya estaba pausada o no se encontro.")
+
+    def _cmd_resume_wallet(self, args: list[str]):
+        if not args:
+            self._reply(
+                "Uso: /resumewallet <b>nombre</b> o <b>0x...</b>\n\n"
+                "Ejemplo: <code>/resumewallet RN1</code>"
+            )
+            return
+
+        address, nickname = self._resolve_monitored_wallet(args)
+        if not address:
+            self._reply(f"⚠️ No se encontro <b>{' '.join(args)}</b> en las wallets monitoreadas.")
+            return
+
+        result = wallet_manager.resume_wallet(address)
+        if result:
+            self._reply(
+                f"{'━' * 28}\n"
+                f"▶️ <b>WALLET REANUDADA</b>\n"
+                f"{'━' * 28}\n\n"
+                f"👤 <b>{nickname}</b>\n"
+                f"<code>{address}</code>\n\n"
+                f"El bot volvera a copiar sus trades."
+            )
+        else:
+            self._reply(f"⚠️ <b>{nickname}</b> no estaba pausada o no se encontro.")
 
     def _cmd_pnl(self):
         from wallet_monitor import WalletMonitor

@@ -3,6 +3,7 @@
 import time
 import requests
 import config
+import wallet_manager
 
 
 class WalletMonitor:
@@ -47,6 +48,8 @@ class WalletMonitor:
         new_trades = []
 
         for wallet in self.wallets:
+            if wallet_manager.is_paused(wallet):
+                continue
             activities = self._fetch_activity(wallet)
             if not activities:
                 continue
