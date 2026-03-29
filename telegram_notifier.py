@@ -330,6 +330,32 @@ def notify_trader_performance(wallet: str, recent_wr: float, recent_pnl: float, 
     )
 
 
+# ─── SCALE INTO POSITION ────────────────────────────────
+
+def notify_trade_scaled(nickname: str, market_name: str, extra_size: float,
+                        new_price: float, avg_entry: float,
+                        total_invested: float, max_allowed: float,
+                        slug: str = None, event_slug: str = None):
+    """Notification when we scale into an existing position."""
+    market_display = _market_link(market_name, slug, event_slug)
+    usdc_added = round(extra_size * new_price, 2)
+    pct_used = round(total_invested / max_allowed * 100) if max_allowed > 0 else 0
+    bar_filled = int(pct_used / 10)
+    cap_bar = "🟦" * bar_filled + "⬜" * (10 - bar_filled)
+
+    _send(
+        f"{'━' * 28}\n"
+        f"📈 <b>POSICION ESCALADA</b>\n"
+        f"{'━' * 28}\n\n"
+        f"👤 <b>{nickname}</b>\n"
+        f"📌 {market_display}\n\n"
+        f"    ➕ Agregado: <b>${usdc_added:,.2f}</b> @ {new_price:.3f}\n"
+        f"    📊 Precio promedio: <b>{avg_entry:.3f}</b>\n"
+        f"    💵 Total invertido: <b>${total_invested:,.2f}</b> / ${max_allowed:,.2f}\n"
+        f"    {cap_bar} {pct_used}% del tope"
+    )
+
+
 # ─── TRADE BUFFER SUMMARY ───────────────────────────────
 
 def notify_trade_buffer_summary(nickname: str, market_name: str, count: int,

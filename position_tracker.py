@@ -73,6 +73,38 @@ class PositionTracker:
         return any(p["token_id"] == token_id and p["status"] == "open"
                    for p in self.positions)
 
+    def get_position(self, token_id: str) -> dict | None:
+        """Return the open position for a token, or None."""
+        for p in self.positions:
+            if p["token_id"] == token_id and p["status"] == "open":
+                return p
+        return None
+
+    def get_invested(self, token_id: str) -> float:
+        """Return total USDC invested in an open position (size * entry_price)."""
+        pos = self.get_position(token_id)
+        if not pos:
+            return 0.0
+        return pos["size"] * pos["entry_price"]
+
+    def add_to_position(self, token_id: str, extra_size: float, new_price: float):
+        """
+        Scale into an existing position: update size and recalculate avg entry price.
+        avg_price = (old_size * old_price + extra_size * new_price) / new_total_size
+        """
+        for pos in self.positions:
+            if pos["token_id"] == token_id and pos["status"] == "open":
+                old_size = pos["size"]
+                old_price = pos["entry_price"]
+                new_total = old_size + extra_size
+                pos["entry_price"] = round(
+                    (old_size * old_price + extra_size * new_price) / new_total, 6
+                )
+                pos["size"] = round(new_total, 4)
+                self._save()
+                return pos
+        return None
+
     def _calc_pnl(self, pos: dict, current_price: float) -> float:
         entry = pos["entry_price"]
         size = pos["size"]

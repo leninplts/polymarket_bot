@@ -135,12 +135,93 @@ class CopyTradingBot:
             tg.notify_trade_detected(trade, market_name, slug, event_slug)
             self._execute_buy(trade, market_name, slug, event_slug)
         else:
-            # Subsequent order for same market — just accumulate, no new notification
+            # Subsequent order for same market — accumulate and attempt to scale
             buf = self._trade_buffer[buf_key]
             buf["total_size"] += float(trade.get("size", 0))
             buf["total_usdc"] += float(trade.get("raw", {}).get("usdcSize", 0))
             buf["count"] += 1
-            buf["last_price"] = float(trade.get("price", 0))
+            new_price = float(trade.get("price", 0))
+            buf["last_price"] = new_price
+
+            # Try to scale into the position if conditions allow
+            self._try_scale(trade, buf, new_price)
+
+    def _try_scale(self, trade: dict, buf: dict, new_price: float):
+        """
+        Try to add to an existing position when the trader keeps buying the same market.
+
+        Rules:
+        1. We must already have the position open
+        2. Total invested in this market must be below MAX_POSITION_PCT * budget
+        3. If SCALE_ON_CONVICTION=true, new price must be >= our avg entry (price going up)
+           — avoids averaging down on losing positions
+        4. Not in dry_run (can't execute real trades)
+        """
+        if self.dry_run:
+            return
+
+        token_id = trade.get("token_id", "")
+        if not token_id:
+            return
+
+        pos = self.positions.get_position(token_id)
+        if not pos:
+            return  # We don't have this position, normal entry already handled
+
+        # Budget cap: FIXED_AMOUNT * 10 is our assumed total budget for sizing
+        total_budget = config.FIXED_AMOUNT * 10
+        max_per_market = total_budget * config.MAX_POSITION_PCT
+        already_invested = self.positions.get_invested(token_id)
+
+        if already_invested >= max_per_market:
+            print(
+                f"  [scale] Skipped — already at max position "
+                f"(${already_invested:.2f} >= ${max_per_market:.2f})"
+            )
+            return
+
+        # Conviction check: only scale if price is going up
+        if config.SCALE_ON_CONVICTION and new_price < pos["entry_price"]:
+            print(
+                f"  [scale] Skipped — price going down "
+                f"({new_price:.3f} < entry {pos['entry_price']:.3f}), "
+                f"not averaging down"
+            )
+            return
+
+        # Calculate how much more we can add without exceeding the cap
+        room = max_per_market - already_invested
+        scale_size = self.trader._calculate_size(trade.get("size", 0), new_price)
+        scale_size = min(scale_size, room / max(new_price, 0.01))  # cap to remaining room
+        scale_size = round(scale_size, 2)
+
+        if scale_size < 1:
+            return  # Too small to bother
+
+        market_name = buf["market_name"]
+        slug = buf["slug"]
+        event_slug = buf["event_slug"]
+
+        result = self.trader.execute_copy_trade({**trade, "size": scale_size})
+        if result:
+            self.stats["trades_copied"] += 1
+            updated = self.positions.add_to_position(token_id, scale_size, new_price)
+            new_avg = updated["entry_price"] if updated else new_price
+            new_total = updated["size"] if updated else pos["size"] + scale_size
+            invested_now = new_total * new_avg
+
+            print(
+                f"  [scale] SCALED +${scale_size * new_price:.2f} @ {new_price:.3f} | "
+                f"avg entry now {new_avg:.3f} | total invested ${invested_now:.2f}"
+            )
+            tg.notify_trade_scaled(
+                wallet_manager.get_nickname(trade.get("wallet", "")),
+                market_name, scale_size, new_price, new_avg,
+                invested_now, max_per_market,
+                slug, event_slug,
+            )
+        else:
+            print(f"  [scale] Scale order failed for {market_name}")
 
     def _flush_trade_buffers(self):
         """
