@@ -47,6 +47,7 @@ class TelegramCommands:
             {"command": "resumewallet", "description": "Reanudar wallet: /resumewallet nombre"},
             {"command": "demobalance", "description": "Ver cuenta demo (balance, PnL)"},
             {"command": "demoreset", "description": "Reiniciar cuenta demo"},
+            {"command": "demoexport", "description": "Exportar datos demo (JSON)"},
             {"command": "pnl", "description": "Ver PnL de traders"},
             {"command": "portfolio", "description": "Ver posiciones reales abiertas"},
             {"command": "scan", "description": "Buscar nuevas wallets rentables"},
@@ -132,6 +133,8 @@ class TelegramCommands:
             self._cmd_demo_balance()
         elif cmd == "/demoreset":
             self._cmd_demo_reset(args)
+        elif cmd == "/demoexport":
+            self._cmd_demo_export()
         elif cmd == "/pnl":
             self._cmd_pnl()
         elif cmd == "/portfolio":
@@ -160,6 +163,7 @@ class TelegramCommands:
                 "/resumewallet nombre — Reanudar wallet\n\n"
                 "<b>Demo:</b>\n"
                 "/demobalance — Ver cuenta demo\n"
+                "/demoexport — Exportar datos demo (JSON)\n"
                 "/demoreset — Reiniciar cuenta demo\n\n"
                 "<b>Analisis:</b>\n"
                 "/pnl — PnL de traders\n"
@@ -289,21 +293,42 @@ class TelegramCommands:
         if s["positions"]:
             text += f"\n📋 <b>Posiciones abiertas ({s['open_count']}):</b>\n"
             for p in s["positions"][:8]:
-                from find_wallets import format_wallet_summary
                 pnl_p = p['pnl']
                 em = "✅" if pnl_p >= 0 else "❌"
                 nick = wallet_manager.get_nickname(p.get("source_wallet", ""))
                 market = p["market_name"][:30]
                 slug = p.get("slug", "")
                 link = f'<a href="https://polymarket.com/market/{slug}">{market}</a>' if slug else market
+                fee_str = f" fee=${p['fee']:.2f}" if p.get("fee") else ""
                 text += (
                     f"  {em} {link}\n"
                     f"      entrada={p['entry_price']:.3f} actual={p['current_price']:.3f} "
-                    f"PnL=<b>${pnl_p:,.2f}</b> ({p['pnl_pct']:+.1f}%) [{nick}]\n"
+                    f"PnL=<b>${pnl_p:,.2f}</b> ({p['pnl_pct']:+.1f}%) [{nick}]{fee_str}\n"
                 )
 
-        if s["closed_count"] > 0:
+        if s.get("closed_details"):
+            text += f"\n📕 <b>Posiciones cerradas ({s['closed_count']}):</b>\n"
+            for cp in s["closed_details"][-8:]:
+                pnl_c = cp["pnl"]
+                em_c = "💰" if pnl_c >= 0 else "💸"
+                market_c = cp["market_name"][:30]
+                slug_c = cp.get("slug", "")
+                link_c = f'<a href="https://polymarket.com/market/{slug_c}">{market_c}</a>' if slug_c else market_c
+                fee_str = f" | fee=${cp['fee']:.2f}" if cp.get("fee") else ""
+                text += (
+                    f"  {em_c} {link_c}\n"
+                    f"      {cp['entry_price']:.3f}→{cp['exit_price']:.3f} "
+                    f"${cp['cost']:.2f}→${cp['proceeds']:.2f} "
+                    f"PnL=<b>${pnl_c:,.2f}</b> ({cp['pnl_pct']:+.1f}%){fee_str}\n"
+                    f"      {cp['close_reason']} | {cp['duration']}\n"
+                )
+        elif s["closed_count"] > 0:
             text += f"\n✔️ Posiciones cerradas: {s['closed_count']}"
+
+        # Fee summary
+        total_fees = s.get("total_fees", 0)
+        if total_fees > 0:
+            text += f"\n💳 <b>Fees estimados pagados: ${total_fees:,.4f}</b>"
 
         self._reply(text)
 
@@ -319,6 +344,68 @@ class TelegramCommands:
             f"💰 Nuevo balance: <b>${balance:,.2f}</b>\n"
             f"Todas las posiciones demo han sido borradas."
         )
+
+    def _send_document(self, file_path: str, caption: str = ""):
+        """Send a file as a Telegram document."""
+        import os
+        try:
+            with open(file_path, "rb") as f:
+                requests.post(
+                    f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendDocument",
+                    data={
+                        "chat_id": config.TELEGRAM_CHAT_ID,
+                        "caption": caption,
+                        "parse_mode": "HTML",
+                    },
+                    files={"document": (os.path.basename(file_path), f)},
+                    timeout=30,
+                )
+        except Exception as e:
+            self._reply(f"Error enviando archivo: <code>{e}</code>")
+
+    def _cmd_demo_export(self):
+        """Export demo account data as JSON file via Telegram."""
+        import json
+        import os
+        import tempfile
+        import time as _time
+
+        self._reply("📦 Generando export de cuenta demo...")
+
+        summary = self.bot.demo.get_summary()
+
+        export = {
+            "summary": {
+                "balance": summary["balance"],
+                "initial_balance": summary["initial_balance"],
+                "in_positions": summary["in_positions"],
+                "open_count": summary["open_count"],
+                "closed_count": summary["closed_count"],
+                "realized_pnl": summary["realized_pnl"],
+                "unrealized_pnl": summary["unrealized_pnl"],
+                "total_pnl": summary["total_pnl"],
+                "total_return_pct": summary["total_return_pct"],
+                "total_fees": summary.get("total_fees", 0),
+            },
+            "open_positions": self.bot.demo.positions,
+            "closed_positions": self.bot.demo.closed_positions,
+            "exported_at": _time.time(),
+        }
+
+        tmp = os.path.join(tempfile.gettempdir(), "demo_export.json")
+        with open(tmp, "w") as f:
+            json.dump(export, f, indent=2, default=str)
+
+        pnl = summary["total_pnl"]
+        pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+        fees = summary.get("total_fees", 0)
+        caption = (
+            f"🎮 Demo Export\n"
+            f"Balance: ${summary['balance']:,.2f} | PnL: {pnl_str}\n"
+            f"Posiciones: {summary['open_count']} abiertas, {summary['closed_count']} cerradas\n"
+            f"Fees estimados: ${fees:,.4f}"
+        )
+        self._send_document(tmp, caption)
 
     def _cmd_pause(self):
         if not self.bot.running:

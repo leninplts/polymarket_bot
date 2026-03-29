@@ -18,6 +18,9 @@ DEMO_FILE = os.path.join(DATA_DIR, "demo_account.json")
 
 STOP_LOSS_PCT = 0.30
 
+# Fee rate cache: {token_id: fee_rate_bps}  — avoids hitting API repeatedly
+_fee_cache: dict[str, int] = {}
+
 
 class DemoAccount:
     def __init__(self, initial_balance: float = 100.0):
@@ -87,6 +90,38 @@ class DemoAccount:
 
         return round(max(1.0, max_amount * factor), 2)
 
+    # ── Fees ──────────────────────────────────────────────────────────────────
+
+    def _get_fee_rate(self, token_id: str) -> int:
+        """Fetch fee rate in basis points from CLOB API. Returns 0 on error.
+        Results are cached per token_id to avoid repeated API calls."""
+        if token_id in _fee_cache:
+            return _fee_cache[token_id]
+        try:
+            resp = requests.get(
+                f"{config.CLOB_API_URL}/fee-rate",
+                params={"token_id": token_id},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            bps = int(resp.json().get("base_fee", 0))
+        except Exception:
+            bps = 0
+        _fee_cache[token_id] = bps
+        return bps
+
+    @staticmethod
+    def _calculate_fee(shares: float, price: float, fee_rate_bps: int) -> float:
+        """Calculate taker fee using Polymarket formula (exponent=1).
+        fee = C × p × feeRate × (p × (1 - p))
+        fee_rate_bps is in basis points (e.g. 72 for crypto).
+        """
+        if fee_rate_bps <= 0 or price <= 0 or price >= 1:
+            return 0.0
+        fee_rate = fee_rate_bps / 10000
+        fee = shares * price * fee_rate * (price * (1 - price))
+        return round(fee, 4)
+
     # ── Positions ─────────────────────────────────────────────────────────────
 
     def has_position(self, token_id: str) -> bool:
@@ -130,6 +165,10 @@ class DemoAccount:
 
         shares = round(size_usdc / price, 4)
 
+        # Calculate taker fee
+        fee_rate_bps = self._get_fee_rate(token_id)
+        buy_fee = self._calculate_fee(shares, price, fee_rate_bps)
+
         pos = {
             "token_id": token_id,
             "size": shares,
@@ -141,9 +180,11 @@ class DemoAccount:
             "source_wallet": source_wallet,
             "opened_at": time.time(),
             "status": "open",
+            "fee": buy_fee,
+            "fee_rate_bps": fee_rate_bps,
         }
 
-        self._data["balance"] = round(self.balance - size_usdc, 2)
+        self._data["balance"] = round(self.balance - size_usdc - buy_fee, 2)
         self._data["positions"].append(pos)
         self._save()
         return pos
@@ -174,6 +215,11 @@ class DemoAccount:
             return None
 
         add_shares = round(add_usdc / price, 4)
+
+        # Calculate taker fee for scaling
+        fee_rate_bps = self._get_fee_rate(token_id)
+        scale_fee = self._calculate_fee(add_shares, price, fee_rate_bps)
+
         old_size = pos["size"]
         old_price = pos["entry_price"]
         new_total = old_size + add_shares
@@ -183,8 +229,10 @@ class DemoAccount:
         )
         pos["size"] = round(new_total, 4)
         pos["cost"] = round(pos["cost"] + add_usdc, 2)
+        pos["fee"] = round(pos.get("fee", 0) + scale_fee, 4)
+        pos["fee_rate_bps"] = fee_rate_bps
 
-        self._data["balance"] = round(self.balance - add_usdc, 2)
+        self._data["balance"] = round(self.balance - add_usdc - scale_fee, 2)
         self._save()
         return pos
 
@@ -195,7 +243,15 @@ class DemoAccount:
         """
         for pos in self._data["positions"]:
             if pos["token_id"] == token_id and pos["status"] == "open":
-                proceeds = round(pos["size"] * exit_price, 2)
+                gross_proceeds = round(pos["size"] * exit_price, 2)
+
+                # Calculate sell fee
+                fee_rate_bps = self._get_fee_rate(token_id)
+                sell_fee = self._calculate_fee(pos["size"], exit_price, fee_rate_bps)
+                proceeds = round(gross_proceeds - sell_fee, 2)
+
+                buy_fee = pos.get("fee", 0)
+                total_fees = round(buy_fee + sell_fee, 4)
                 pnl = round(proceeds - pos["cost"], 2)
 
                 pos["status"] = "closed"
@@ -204,6 +260,8 @@ class DemoAccount:
                 pos["close_reason"] = reason
                 pos["pnl"] = pnl
                 pos["proceeds"] = proceeds
+                pos["sell_fee"] = sell_fee
+                pos["total_fees"] = total_fees
 
                 self._data["balance"] = round(self.balance + proceeds, 2)
                 self._data.setdefault("closed_positions", []).append(pos)
@@ -268,12 +326,15 @@ class DemoAccount:
         realized_pnl = sum(p.get("pnl", 0) for p in self.closed_positions)
 
         unrealized_pnl = 0.0
+        open_fees = 0.0
         position_details = []
         for pos in open_positions:
             current_price = self._get_price(pos["token_id"]) or pos["entry_price"]
             pnl = round(pos["size"] * (current_price - pos["entry_price"]), 2)
             pnl_pct = round((current_price - pos["entry_price"]) / pos["entry_price"] * 100, 1) if pos["entry_price"] > 0 else 0
             unrealized_pnl += pnl
+            pos_fee = pos.get("fee", 0)
+            open_fees += pos_fee
             position_details.append({
                 "market_name": pos["market_name"],
                 "slug": pos.get("slug", ""),
@@ -284,9 +345,48 @@ class DemoAccount:
                 "cost": pos["cost"],
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
+                "fee": pos_fee,
                 "source_wallet": pos.get("source_wallet", ""),
             })
 
+        # Closed position details
+        closed_fees = 0.0
+        closed_details = []
+        for pos in self.closed_positions:
+            entry = pos.get("entry_price", 0)
+            exit_p = pos.get("exit_price", 0)
+            cost = pos.get("cost", 0)
+            proceeds = pos.get("proceeds", 0)
+            pnl = pos.get("pnl", 0)
+            pnl_pct = round((exit_p - entry) / entry * 100, 1) if entry > 0 else 0
+            total_fee = pos.get("total_fees", pos.get("fee", 0) + pos.get("sell_fee", 0))
+            closed_fees += total_fee
+
+            opened = pos.get("opened_at", 0)
+            closed_at = pos.get("closed_at", 0)
+            if opened and closed_at:
+                dur_min = (closed_at - opened) / 60
+                duration = f"{dur_min:.0f}min" if dur_min < 60 else f"{dur_min / 60:.1f}h"
+            else:
+                duration = "?"
+
+            closed_details.append({
+                "market_name": pos.get("market_name", "?"),
+                "slug": pos.get("slug", ""),
+                "event_slug": pos.get("event_slug", ""),
+                "entry_price": entry,
+                "exit_price": exit_p,
+                "cost": cost,
+                "proceeds": proceeds,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "close_reason": pos.get("close_reason", "?"),
+                "duration": duration,
+                "fee": total_fee,
+                "source_wallet": pos.get("source_wallet", ""),
+            })
+
+        total_fees = round(open_fees + closed_fees, 4)
         total_pnl = round(realized_pnl + unrealized_pnl, 2)
         total_return_pct = round(total_pnl / self.initial_balance * 100, 1) if self.initial_balance > 0 else 0
 
@@ -300,7 +400,9 @@ class DemoAccount:
             "unrealized_pnl": round(unrealized_pnl, 2),
             "total_pnl": total_pnl,
             "total_return_pct": total_return_pct,
+            "total_fees": total_fees,
             "positions": position_details,
+            "closed_details": closed_details,
         }
 
     def reset(self, initial_balance: float = None):
