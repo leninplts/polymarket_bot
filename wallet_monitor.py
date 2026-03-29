@@ -8,8 +8,11 @@ import config
 class WalletMonitor:
     def __init__(self, wallets: list[str]):
         self.wallets = wallets
-        # Track the latest trade timestamp per wallet to avoid duplicates
-        self._last_seen: dict[str, str] = {}
+        # Track the latest seen transaction hashes per wallet to avoid duplicates.
+        # Using a set of hashes is reliable since hashes are unique per trade.
+        self._seen_hashes: dict[str, set] = {}
+        # Also track latest timestamp per wallet (for ordering)
+        self._last_ts: dict[str, float] = {}
 
     def _fetch_activity(self, wallet: str) -> list[dict]:
         """Fetch recent trade activity for a wallet."""
@@ -48,15 +51,30 @@ class WalletMonitor:
             if not activities:
                 continue
 
-            last_seen = self._last_seen.get(wallet)
+            seen = self._seen_hashes.setdefault(wallet, set())
+            last_ts = self._last_ts.get(wallet, 0)
+
+            # First call: seed seen hashes from existing activity so we don't
+            # replay old trades on startup.
+            first_run = (last_ts == 0)
 
             for activity in activities:
-                # Activity items have a timestamp field
-                ts = activity.get("timestamp") or activity.get("createdAt") or ""
-                trade_id = activity.get("transactionHash") or activity.get("id") or ts
+                ts = float(activity.get("timestamp") or activity.get("createdAt") or 0)
+                tx_hash = activity.get("transactionHash") or activity.get("id") or str(ts)
 
-                if last_seen and trade_id <= last_seen:
+                # Stop iterating once we reach trades older than what we've seen
+                if ts < last_ts:
                     break
+
+                # Skip already-processed trades (handles same-timestamp batches)
+                if tx_hash in seen:
+                    continue
+
+                seen.add(tx_hash)
+
+                # On first run just seed the set — don't emit trades
+                if first_run:
+                    continue
 
                 # Only process BUY/SELL trades (skip deposits, withdrawals, etc.)
                 action = (activity.get("type") or activity.get("action") or "").upper()
@@ -73,7 +91,7 @@ class WalletMonitor:
 
                 new_trades.append({
                     "wallet": wallet,
-                    "trade_id": trade_id,
+                    "trade_id": tx_hash,
                     "action": action,
                     "side": activity.get("side", "").upper(),
                     "asset": activity.get("asset"),
@@ -87,12 +105,11 @@ class WalletMonitor:
                     "raw": activity,
                 })
 
-            # Update last seen to the most recent trade
+            # Update last seen timestamp to the most recent activity
             if activities:
-                first = activities[0]
-                first_id = first.get("transactionHash") or first.get("id") or first.get("timestamp", "")
-                if not last_seen or first_id > last_seen:
-                    self._last_seen[wallet] = first_id
+                newest_ts = float(activities[0].get("timestamp") or activities[0].get("createdAt") or 0)
+                if newest_ts > last_ts:
+                    self._last_ts[wallet] = newest_ts
 
         return new_trades
 
