@@ -122,10 +122,9 @@ def get_leaderboard_wallets(period: str = "all") -> list[dict]:
             seen.add(a)
             unique_addresses.append(a)
 
-    # Extract names — they appear as text nodes near the profile links
-    # Pattern: the name appears right after the profile link in the HTML
+    # Extract names — they appear inside <p class="...truncate">NAME</p>
     name_pattern = re.findall(
-        r'href="/profile/0x[a-fA-F0-9]{40}"[^>]*>([^<]{1,40})</a>',
+        r'class="[^"]*truncate[^"]*">([^<]{1,60})</p>',
         html
     )
 
@@ -270,6 +269,23 @@ def scan_wallet(address: str, leaderboard_data: dict = None) -> dict:
     days_since = (time.time() - last_trade_ts) / 86400 if last_trade_ts > 0 else 999
     account_age_days = round((time.time() - first_trade_ts) / 86400) if first_trade_ts > 0 else 0
 
+    # Get portfolio value for ROI calculation
+    portfolio_value = 0.0
+    try:
+        resp = requests.get(
+            f"{DATA_API}/value",
+            params={"user": address},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            portfolio_value = float(data[0].get("value", 0))
+    except Exception:
+        pass
+
+    roi = round(leaderboard_pnl / portfolio_value * 100, 1) if portfolio_value > 0 else 0.0
+
     # Get current open positions for category breakdown
     categories = Counter()
     open_positions = 0
@@ -315,6 +331,8 @@ def scan_wallet(address: str, leaderboard_data: dict = None) -> dict:
         "nickname": nickname,
         "rank": rank,
         "leaderboard_pnl": leaderboard_pnl,
+        "portfolio_value": round(portfolio_value, 2),
+        "roi": roi,
         "open_positions": open_positions,
         "main_category": main_cat[0],
         "category_pct": cat_pct,
@@ -322,9 +340,8 @@ def scan_wallet(address: str, leaderboard_data: dict = None) -> dict:
         "last_trade_ts": last_trade_ts,
         "account_age_days": account_age_days,
         "total_historical_trades": total_historical_trades,
-        # Legacy fields so format_wallet_summary stays compatible
+        # Legacy fields
         "pnl": leaderboard_pnl,
-        "roi": 0.0,
         "win_rate": 0.0,
         "wins": 0,
         "losses": 0,
@@ -407,11 +424,16 @@ def format_wallet_summary(w: dict) -> str:
     rank_str = f"#{rank} " if rank else ""
     pnl_str = f"+${lb_pnl:,.0f}" if lb_pnl >= 0 else f"-${abs(lb_pnl):,.0f}"
     specialist = f"{category} ({cat_pct}%)" if cat_pct > 0 else category
+    portfolio_value = w.get("portfolio_value", 0)
+    roi = w.get("roi", 0.0)
+    roi_str = f"+{roi:.0f}%" if roi >= 0 else f"{roi:.0f}%"
+    portfolio_str = f"${portfolio_value:,.0f}" if portfolio_value > 0 else "N/A"
 
     return (
         f"👤 {rank_str}<b><a href=\"{profile_url}\">{name}</a></b>\n"
         f"    <code>{addr}</code>\n"
-        f"    💰 PnL (leaderboard): <b>{pnl_str}</b>\n"
+        f"    💰 PnL: <b>{pnl_str}</b> | ROI: <b>{roi_str}</b>\n"
+        f"    🏦 Portfolio actual: {portfolio_str}\n"
         f"    🏷 Especialidad: {specialist}\n"
         f"    📈 Posiciones abiertas: {open_pos}\n"
         f"    🕐 Ultimo trade: {active}\n"

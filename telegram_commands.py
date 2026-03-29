@@ -39,8 +39,8 @@ class TelegramCommands:
                     {"command": "pause", "description": "Pausar el bot"},
                     {"command": "resume", "description": "Reanudar el bot"},
                     {"command": "wallets", "description": "Ver wallets que copiamos"},
-                    {"command": "addwallet", "description": "Agregar wallet: /addwallet 0x... nombre"},
-                    {"command": "removewallet", "description": "Quitar wallet: /removewallet 0x..."},
+                    {"command": "addwallet", "description": "Agregar: /addwallet 0x... o /addwallet nombre"},
+                    {"command": "removewallet", "description": "Quitar: /removewallet 0x... o /removewallet nombre"},
                     {"command": "pnl", "description": "Ver PnL de traders"},
                     {"command": "portfolio", "description": "Ver nuestras posiciones abiertas"},
                     {"command": "scan", "description": "Buscar nuevas wallets rentables"},
@@ -229,31 +229,70 @@ class TelegramCommands:
             + "\n\n".join(lines)
         )
 
+    def _resolve_wallet_by_name(self, name: str) -> tuple[str, str]:
+        """
+        Given a nickname, search the Polymarket leaderboard and return (address, nickname).
+        Returns ("", "") if not found.
+        """
+        try:
+            from find_wallets import get_leaderboard_wallets
+            lb = get_leaderboard_wallets()
+            name_lower = name.lower()
+            for w in lb:
+                if w.get("nickname", "").lower() == name_lower:
+                    return w["address"], w["nickname"]
+            # Partial match fallback
+            for w in lb:
+                if name_lower in w.get("nickname", "").lower():
+                    return w["address"], w["nickname"]
+        except Exception:
+            pass
+        return "", ""
+
     def _cmd_add_wallet(self, args: list[str]):
         if not args:
             self._reply(
-                "Uso: /addwallet <code>0x...</code> nombre\n\n"
-                "Ejemplo:\n"
-                "<code>/addwallet 0x3b5c629f114098b0dee345fb78b7a3a013c7126e SMCAOMCRL</code>"
+                "Uso: /addwallet <code>0x...</code> [nombre]\n"
+                "  o: /addwallet <b>nombre</b> (busca en leaderboard)\n\n"
+                "Ejemplos:\n"
+                "<code>/addwallet 0x3b5c629f...  SMCAOMCRL</code>\n"
+                "<code>/addwallet RN1</code>"
             )
             return
 
-        address = args[0]
-        nickname = " ".join(args[1:]) if len(args) > 1 else ""
+        first_arg = args[0]
 
-        if not address.startswith("0x") or len(address) < 20:
-            self._reply("⚠️ Direccion invalida. Debe empezar con 0x")
-            return
-
-        # Fetch nickname from API if not provided
-        if not nickname:
-            from find_wallets import _get_nickname
-            nickname = _get_nickname(address)
+        # --- By name: search leaderboard ---
+        if not first_arg.startswith("0x"):
+            name_query = " ".join(args)
+            self._reply(f"🔍 Buscando <b>{name_query}</b> en el leaderboard...")
+            address, nickname = self._resolve_wallet_by_name(name_query)
+            if not address:
+                self._reply(f"⚠️ No se encontro <b>{name_query}</b> en el leaderboard de Polymarket.")
+                return
+        else:
+            address = first_arg
+            nickname = " ".join(args[1:]) if len(args) > 1 else ""
+            if len(address) < 20:
+                self._reply("⚠️ Direccion invalida.")
+                return
+            # Auto-fetch nickname from activity if not provided
+            if not nickname:
+                try:
+                    import requests, config
+                    resp = requests.get(
+                        f"{config.DATA_API_URL}/activity",
+                        params={"user": address, "limit": 1},
+                        timeout=10,
+                    )
+                    data = resp.json()
+                    if data:
+                        nickname = data[0].get("name") or data[0].get("pseudonym") or ""
+                except Exception:
+                    pass
 
         if wallet_manager.add_wallet(address, nickname):
-            # Update the bot's monitor with the new wallet list
             self.bot.monitor.wallets = wallet_manager.get_addresses()
-
             display_name = nickname or f"{address[:10]}...{address[-6:]}"
             self._reply(
                 f"{'━' * 28}\n"
@@ -264,15 +303,43 @@ class TelegramCommands:
                 f"Total wallets: {len(wallet_manager.get_all())}"
             )
         else:
-            self._reply("⚠️ Esta wallet ya está en la lista.")
+            display_name = nickname or f"{address[:10]}...{address[-6:]}"
+            self._reply(f"⚠️ <b>{display_name}</b> ya esta en la lista.")
 
     def _cmd_remove_wallet(self, args: list[str]):
         if not args:
-            self._reply("Uso: /removewallet <code>0x...</code>")
+            self._reply(
+                "Uso: /removewallet <code>0x...</code>\n"
+                "  o: /removewallet <b>nombre</b>"
+            )
             return
 
-        address = args[0]
-        nickname = wallet_manager.get_nickname(address)
+        first_arg = args[0]
+
+        # --- By name: search monitored wallets ---
+        if not first_arg.startswith("0x"):
+            name_query = " ".join(args).lower()
+            wallets = wallet_manager.get_all()
+            match = None
+            # Exact match first
+            for w in wallets:
+                if w.get("nickname", "").lower() == name_query:
+                    match = w
+                    break
+            # Partial match fallback
+            if not match:
+                for w in wallets:
+                    if name_query in w.get("nickname", "").lower():
+                        match = w
+                        break
+            if not match:
+                self._reply(f"⚠️ No se encontro <b>{' '.join(args)}</b> en las wallets monitoreadas.")
+                return
+            address = match["address"]
+            nickname = match.get("nickname") or f"{address[:10]}...{address[-6:]}"
+        else:
+            address = first_arg
+            nickname = wallet_manager.get_nickname(address)
 
         if wallet_manager.remove_wallet(address):
             self.bot.monitor.wallets = wallet_manager.get_addresses()
@@ -284,7 +351,7 @@ class TelegramCommands:
                 f"Total wallets: {len(wallet_manager.get_all())}"
             )
         else:
-            self._reply("⚠️ Wallet no encontrada.")
+            self._reply(f"⚠️ Wallet no encontrada.")
 
     def _cmd_pnl(self):
         from wallet_monitor import WalletMonitor
