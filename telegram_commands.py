@@ -356,7 +356,7 @@ class TelegramCommands:
     # ─── Scanner ─────────────────────────────────────────
 
     def _cmd_scan(self):
-        self._reply("🔍 <b>Escaneando mercados...</b>\n30 mercados × 500 trades c/u\nEsto puede tardar 3-5 minutos.")
+        self._reply("🔍 <b>Escaneando leaderboard de Polymarket...</b>\nEsto tarda ~20 segundos.")
 
         # Run in a thread to not block command processing
         t = threading.Thread(target=self._run_scan, daemon=True)
@@ -366,35 +366,28 @@ class TelegramCommands:
         import time as _time
         try:
             from find_wallets import (
-                get_top_markets, _fetch_market_traders, scan_wallet,
-                format_wallet_summary, MIN_POSITIONS, MIN_PNL, MIN_WIN_RATE,
-                MIN_ROI, MAX_INACTIVE_DAYS, MIN_ACCOUNT_AGE_DAYS,
-                MARKET_WORKERS, WALLET_WORKERS,
+                get_leaderboard_wallets, scan_wallet,
+                format_wallet_summary, MAX_INACTIVE_DAYS, MIN_ACCOUNT_AGE_DAYS,
+                WALLET_WORKERS,
             )
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            # --- Fase 1: obtener mercados ---
-            self._reply("📡 <b>[1/4]</b> Obteniendo top 30 mercados por volumen...")
-            markets = get_top_markets(30)
-            self._reply(f"✅ <b>[1/4]</b> {len(markets)} mercados obtenidos.")
+            # --- Fase 1: leaderboard ---
+            self._reply("📡 <b>[1/3]</b> Obteniendo leaderboard oficial de Polymarket...")
+            lb_wallets = get_leaderboard_wallets(period="all")
+            self._reply(f"✅ <b>[1/3]</b> {len(lb_wallets)} wallets en el leaderboard.")
 
-            # --- Fase 2: scraping de traders por mercado ---
-            self._reply(f"🕸 <b>[2/4]</b> Scrapeando traders en {len(markets)} mercados ({MARKET_WORKERS} en paralelo)...")
-            trader_addresses = set()
-            with ThreadPoolExecutor(max_workers=MARKET_WORKERS) as ex:
-                futures = {ex.submit(_fetch_market_traders, m, True): m for m in markets}
-                for fut in as_completed(futures):
-                    trader_addresses |= fut.result()
-            self._reply(f"✅ <b>[2/4]</b> {len(trader_addresses)} traders unicos encontrados.")
-
-            # --- Fase 3: analisis de wallets en paralelo ---
-            self._reply(f"🔬 <b>[3/4]</b> Analizando {len(trader_addresses)} wallets ({WALLET_WORKERS} en paralelo)...\nEsto tarda 1-2 min.")
+            # --- Fase 2: enriquecer con datos de actividad ---
+            self._reply(f"🔬 <b>[2/3]</b> Enriqueciendo {len(lb_wallets)} wallets con datos de actividad...")
             results = []
-            addr_list = list(trader_addresses)
             done = 0
-            total = len(addr_list)
+            total = len(lb_wallets)
+
+            def _enrich(entry):
+                return scan_wallet(entry["address"], leaderboard_data=entry)
+
             with ThreadPoolExecutor(max_workers=WALLET_WORKERS) as ex:
-                futures = {ex.submit(scan_wallet, addr): addr for addr in addr_list}
+                futures = {ex.submit(_enrich, entry): entry for entry in lb_wallets}
                 for fut in as_completed(futures):
                     done += 1
                     stats = fut.result()
@@ -405,18 +398,16 @@ class TelegramCommands:
                     if stats["account_age_days"] > 0 and stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
                         continue
                     results.append(stats)
-            results.sort(key=lambda x: x["pnl"], reverse=True)
-            self._reply(f"✅ <b>[3/4]</b> Analisis completo: {done} wallets procesadas, <b>{len(results)} pasan filtros</b>.")
+            results.sort(key=lambda x: x["leaderboard_pnl"], reverse=True)
+            self._reply(f"✅ <b>[2/3]</b> {done} wallets procesadas, <b>{len(results)} activas en los ultimos {MAX_INACTIVE_DAYS} dias</b>.")
 
-            # --- Fase 4: enviar resultados ---
-            self._reply("📊 <b>[4/4]</b> Preparando resultados...")
+            # --- Fase 3: enviar resultados ---
+            self._reply("📊 <b>[3/3]</b> Preparando resultados...")
 
             if not results:
                 self._reply(
                     "🔍 <b>Scan completado — sin resultados</b>\n\n"
-                    "Ninguna wallet cumple todos los criterios:\n"
-                    f"  PnL&gt;${MIN_PNL} | WR&gt;{MIN_WIN_RATE:.0%} | ROI&gt;{MIN_ROI}%\n"
-                    f"  {MIN_POSITIONS}+ pos | Activo&lt;{MAX_INACTIVE_DAYS}d | Cuenta&gt;{MIN_ACCOUNT_AGE_DAYS}d"
+                    f"Ninguna wallet del leaderboard estuvo activa en los ultimos {MAX_INACTIVE_DAYS} dias."
                 )
                 return
 

@@ -1,13 +1,10 @@
 """
 Polymarket Wallet Scanner
 
-Finds profitable wallets based on:
-- PnL > $500
-- Win rate > 55% (excluding resolved/extreme-price positions)
-- ROI > 10%
-- Minimum 5 positions (excluding resolved markets)
+Source: Polymarket official leaderboard (scraped via requests)
+Filters applied on top of leaderboard data:
 - Active in last 7 days
-- Account age > 30 days (anti-survivorship bias, skipped if API returns no data)
+- Account age > 30 days (skipped if API returns no data)
 
 Can run standalone or be called by the bot for auto-scanning.
 """
@@ -18,21 +15,25 @@ import requests
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import re
 
 GAMMA_API = "https://gamma-api.polymarket.com"
-DATA_API = "https://data-api.polymarket.com"
+DATA_API  = "https://data-api.polymarket.com"
+LEADERBOARD_URL = "https://polymarket.com/leaderboard"
 
-# Filters
-MIN_PNL = 500
-MIN_WIN_RATE = 0.55
-MIN_ROI = 10.0          # Minimum ROI % — filters low-capital wallets that got lucky
-MIN_POSITIONS = 5       # Excluding resolved/extreme-price markets
-MAX_INACTIVE_DAYS = 7
-MIN_ACCOUNT_AGE_DAYS = 30  # Skipped if API returns 0 (data unavailable)
+# Post-scan filters (leaderboard already ranks by PnL so no PnL/WR/ROI filter needed)
+MAX_INACTIVE_DAYS   = 7
+MIN_ACCOUNT_AGE_DAYS = 30   # Skipped if API returns 0 (data unavailable)
 
 # Parallelism
-MARKET_WORKERS = 10   # concurrent market scrapers
-WALLET_WORKERS = 20   # concurrent wallet analyzers
+WALLET_WORKERS = 20
+
+# Keep legacy constants so telegram_commands.py imports don't break
+MIN_PNL       = 0
+MIN_WIN_RATE  = 0.0
+MIN_ROI       = 0.0
+MIN_POSITIONS = 0
+MARKET_WORKERS = 10
 
 # Thread-safe print lock
 _print_lock = threading.Lock()
@@ -42,8 +43,10 @@ def _tprint(*args, **kwargs):
         print(*args, **kwargs)
 
 
+# ── Legacy helpers kept for backward-compat ──────────────────────────────────
+
 def get_top_markets(limit: int = 50) -> list[dict]:
-    """Fetch the most active markets."""
+    """Fetch the most active markets (kept for backward compatibility)."""
     resp = requests.get(
         f"{GAMMA_API}/markets",
         params={"limit": limit, "order": "volume", "ascending": "false", "active": "true"},
@@ -54,12 +57,11 @@ def get_top_markets(limit: int = 50) -> list[dict]:
 
 
 def _fetch_market_traders(market: dict, quiet: bool = False) -> set:
-    """Scrape all trader addresses from a single market. Returns a set of addresses."""
+    """Scrape trader addresses from a single market (kept for backward compat)."""
     condition_id = market.get("conditionId", "")
     slug = market.get("slug", "")
     question = market.get("question", slug)[:60]
     addresses = set()
-
     try:
         for offset in range(0, 500, 100):
             resp = requests.get(
@@ -80,9 +82,78 @@ def _fetch_market_traders(market: dict, quiet: bool = False) -> set:
     except Exception as e:
         if not quiet:
             _tprint(f"  ERR {question}: {e}")
-
     return addresses
 
+
+# ── New leaderboard scraper ───────────────────────────────────────────────────
+
+def get_leaderboard_wallets(period: str = "all") -> list[dict]:
+    """
+    Scrape Polymarket leaderboard and return list of
+    {"address": "0x...", "nickname": "...", "leaderboard_pnl": float, "rank": int}
+
+    period: "today" | "weekly" | "monthly" | "all"
+    """
+    period_param = {"today": "day", "weekly": "week", "monthly": "month", "all": "all"}.get(period, "all")
+    url = f"{LEADERBOARD_URL}?period={period_param}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch leaderboard: {e}")
+
+    # Extract wallet addresses from href="/profile/0x..."
+    addresses = re.findall(r'href="/profile/(0x[a-fA-F0-9]{40})"', html)
+    # Deduplicate preserving order
+    seen = set()
+    unique_addresses = []
+    for addr in addresses:
+        a = addr.lower()
+        if a not in seen:
+            seen.add(a)
+            unique_addresses.append(a)
+
+    # Extract names — they appear as text nodes near the profile links
+    # Pattern: the name appears right after the profile link in the HTML
+    name_pattern = re.findall(
+        r'href="/profile/0x[a-fA-F0-9]{40}"[^>]*>([^<]{1,40})</a>',
+        html
+    )
+
+    # Extract PnL values — format: +$1,234,567 or -$1,234
+    pnl_pattern = re.findall(r'([+-])\$([0-9,]+)', html)
+    pnl_values = []
+    for sign, val in pnl_pattern:
+        try:
+            pnl_values.append(float(sign + val.replace(",", "")))
+        except Exception:
+            pass
+
+    results = []
+    for i, addr in enumerate(unique_addresses):
+        nickname = name_pattern[i] if i < len(name_pattern) else ""
+        nickname = nickname.strip()
+        lb_pnl = pnl_values[i] if i < len(pnl_values) else 0.0
+        results.append({
+            "address": addr,
+            "nickname": nickname,
+            "leaderboard_pnl": lb_pnl,
+            "rank": i + 1,
+        })
+
+    return results
+
+
+# ── Profile / activity helpers ────────────────────────────────────────────────
 
 def _get_profile(address: str) -> dict:
     """Fetch nickname and first trade timestamp from activity history."""
@@ -145,102 +216,25 @@ def _get_profile(address: str) -> dict:
     }
 
 
-def scan_wallet(address: str) -> dict:
-    """Deep analysis of a wallet's trading performance."""
-    try:
-        resp = requests.get(
-            f"{DATA_API}/positions",
-            params={"user": address},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        positions = resp.json()
-    except Exception:
-        return None
+def scan_wallet(address: str, leaderboard_data: dict = None) -> dict:
+    """
+    Analyze a wallet.
+    If leaderboard_data is provided (address, nickname, leaderboard_pnl, rank),
+    we use that PnL directly and skip the /positions scan.
+    We still fetch activity for last-trade timestamp and account age.
+    """
+    lb = leaderboard_data or {}
+    nickname = lb.get("nickname", "")
+    leaderboard_pnl = lb.get("leaderboard_pnl", 0.0)
+    rank = lb.get("rank", 0)
 
-    if not positions:
-        return None
-
-    wins = 0
-    losses = 0
-    total_pnl = 0.0
-    total_invested = 0.0
-    categories = Counter()
-    skipped_resolved = 0
-
-    for pos in positions:
-        size = float(pos.get("size", 0))
-        if size == 0:
-            continue
-
-        avg_price = float(pos.get("avgPrice", 0))
-        cur_price = float(pos.get("curPrice") or pos.get("currentPrice", 0))
-
-        # Skip resolved/about-to-resolve markets — prices at extremes inflate WR artificially.
-        # A trader holding YES at 0.98 didn't "win" through skill, the market already resolved.
-        if cur_price >= 0.95 or cur_price <= 0.05:
-            skipped_resolved += 1
-            continue
-
-        invested = size * avg_price
-        pnl = size * (cur_price - avg_price)
-        total_pnl += pnl
-        total_invested += invested
-
-        if pnl > 0:
-            wins += 1
-        else:
-            losses += 1
-
-        title = (pos.get("title") or "").lower()
-        if any(w in title for w in ["counter-strike", "cs2", "dota", "league of legends", "valorant"]):
-            categories["Esports"] += 1
-        elif any(w in title for w in ["nba", "nfl", "nhl", "mlb", "spurs", "lakers", "celtics"]):
-            categories["NBA/Sports US"] += 1
-        elif any(w in title for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "price of"]):
-            categories["Crypto"] += 1
-        elif any(w in title for w in ["atp", "wta", "open", "tennis", "slam"]):
-            categories["Tennis"] += 1
-        elif any(w in title for w in ["fifa", "premier", "liga", "serie a", "win on", "spread:"]):
-            categories["Football/Soccer"] += 1
-        elif any(w in title for w in ["trump", "biden", "elect", "president", "congress"]):
-            categories["Politics"] += 1
-        else:
-            categories["Other"] += 1
-
-    total = wins + losses
-    if total == 0:
-        return None
-
-    win_rate = wins / total
-    roi = (total_pnl / total_invested * 100) if total_invested > 0 else 0
-
-    # --- Pre-filter before expensive profile calls ---
-    if total < MIN_POSITIONS:
-        return None
-    if total_pnl < MIN_PNL:
-        return None
-    if win_rate < MIN_WIN_RATE:
-        return None
-    if roi < MIN_ROI:
-        return None
-
-    main_cat = categories.most_common(1)[0] if categories else ("Unknown", 0)
-    cat_pct = main_cat[1] / total if total > 0 else 0
-
-    # Full profile (nickname + account age) — only for wallets that passed pre-filter
-    profile = _get_profile(address)
-    nickname = profile["nickname"]
-    first_trade_ts = profile["first_trade_ts"]
-    total_historical_trades = profile["total_historical_trades"]
-
-    if first_trade_ts > 0:
-        account_age_days = (time.time() - first_trade_ts) / 86400
-    else:
-        account_age_days = 0
-
+    # Get last trade time + account age from activity
     last_trade_ts = 0
+    first_trade_ts = 0
+    total_historical_trades = 0
+
     try:
+        # Most recent trade
         resp = requests.get(
             f"{DATA_API}/activity",
             params={"user": address, "limit": 1},
@@ -250,81 +244,153 @@ def scan_wallet(address: str) -> dict:
         data = resp.json()
         if data:
             last_trade_ts = float(data[0].get("timestamp", 0))
+            if not nickname:
+                nickname = data[0].get("name") or data[0].get("pseudonym") or ""
     except Exception:
         pass
+
+    # Account age: try a few offsets
+    try:
+        for check_offset in [200, 50]:
+            resp = requests.get(
+                f"{DATA_API}/activity",
+                params={"user": address, "limit": 1, "offset": check_offset},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data:
+                total_historical_trades = check_offset + 1
+                first_trade_ts = float(data[0].get("timestamp", 0))
+            else:
+                break
+    except Exception:
+        pass
+
     days_since = (time.time() - last_trade_ts) / 86400 if last_trade_ts > 0 else 999
+    account_age_days = round((time.time() - first_trade_ts) / 86400) if first_trade_ts > 0 else 0
+
+    # Get current open positions for category breakdown
+    categories = Counter()
+    open_positions = 0
+    try:
+        resp = requests.get(
+            f"{DATA_API}/positions",
+            params={"user": address},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        positions = resp.json()
+        for pos in positions:
+            size = float(pos.get("size", 0))
+            if size == 0:
+                continue
+            cur_price = float(pos.get("curPrice") or pos.get("currentPrice", 0))
+            if cur_price >= 0.95 or cur_price <= 0.05:
+                continue
+            open_positions += 1
+            title = (pos.get("title") or "").lower()
+            if any(w in title for w in ["counter-strike", "cs2", "dota", "league of legends", "valorant"]):
+                categories["Esports"] += 1
+            elif any(w in title for w in ["nba", "nfl", "nhl", "mlb", "spurs", "lakers", "celtics"]):
+                categories["NBA/Sports US"] += 1
+            elif any(w in title for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "price of"]):
+                categories["Crypto"] += 1
+            elif any(w in title for w in ["atp", "wta", "open", "tennis", "slam"]):
+                categories["Tennis"] += 1
+            elif any(w in title for w in ["fifa", "premier", "liga", "serie a", "win on", "spread:"]):
+                categories["Football/Soccer"] += 1
+            elif any(w in title for w in ["trump", "biden", "elect", "president", "congress"]):
+                categories["Politics"] += 1
+            else:
+                categories["Other"] += 1
+    except Exception:
+        pass
+
+    main_cat = categories.most_common(1)[0] if categories else ("Mixed", 0)
+    cat_pct = round(main_cat[1] / open_positions * 100) if open_positions > 0 else 0
 
     return {
         "address": address,
         "nickname": nickname,
-        "positions": total,
-        "wins": wins,
-        "losses": losses,
-        "skipped_resolved": skipped_resolved,
-        "pnl": round(total_pnl, 2),
-        "roi": round(roi, 1),
-        "win_rate": round(win_rate, 2),
-        "total_invested": round(total_invested, 2),
+        "rank": rank,
+        "leaderboard_pnl": leaderboard_pnl,
+        "open_positions": open_positions,
         "main_category": main_cat[0],
-        "category_pct": round(cat_pct * 100),
+        "category_pct": cat_pct,
         "days_since_last_trade": round(days_since, 1),
         "last_trade_ts": last_trade_ts,
-        "account_age_days": round(account_age_days),
+        "account_age_days": account_age_days,
         "total_historical_trades": total_historical_trades,
-        "first_trade_ts": first_trade_ts,
+        # Legacy fields so format_wallet_summary stays compatible
+        "pnl": leaderboard_pnl,
+        "roi": 0.0,
+        "win_rate": 0.0,
+        "wins": 0,
+        "losses": 0,
+        "positions": open_positions,
+        "total_invested": 0.0,
+        "skipped_resolved": 0,
     }
 
 
-def find_profitable_wallets(markets: list[dict], quiet: bool = False) -> list[dict]:
-    """Find wallets matching our criteria from active markets."""
-
-    # --- Phase 1: scrape all markets in parallel ---
-    trader_addresses: set = set()
+def find_profitable_wallets(markets: list[dict] = None, quiet: bool = False) -> list[dict]:
+    """
+    Find profitable wallets from the Polymarket leaderboard.
+    `markets` param is ignored (kept for backward compatibility with telegram_commands.py).
+    """
     if not quiet:
-        _tprint(f"\n  Scraping {len(markets)} markets in parallel ({MARKET_WORKERS} workers)...\n")
+        _tprint(f"\n  Fetching Polymarket leaderboard...")
 
-    with ThreadPoolExecutor(max_workers=MARKET_WORKERS) as ex:
-        futures = {ex.submit(_fetch_market_traders, m, quiet): m for m in markets}
-        for fut in as_completed(futures):
-            trader_addresses |= fut.result()
+    lb_wallets = get_leaderboard_wallets(period="all")
 
     if not quiet:
-        _tprint(f"\n  Found {len(trader_addresses)} unique traders. Analyzing in parallel ({WALLET_WORKERS} workers)...\n")
+        _tprint(f"  Found {len(lb_wallets)} wallets on leaderboard.")
+        _tprint(f"  Enriching with activity data ({WALLET_WORKERS} workers)...\n")
 
-    # --- Phase 2: analyze all wallets in parallel ---
     results = []
     done = 0
-    total_addrs = len(trader_addresses)
-    addr_list = list(trader_addresses)
+    total = len(lb_wallets)
+
+    def _enrich(entry):
+        return scan_wallet(entry["address"], leaderboard_data=entry)
 
     with ThreadPoolExecutor(max_workers=WALLET_WORKERS) as ex:
-        futures = {ex.submit(scan_wallet, addr): addr for addr in addr_list}
+        futures = {ex.submit(_enrich, entry): entry for entry in lb_wallets}
         for fut in as_completed(futures):
             done += 1
-            if not quiet and done % 50 == 0:
-                _tprint(f"    Analyzed {done}/{total_addrs}...")
+            if not quiet and done % 10 == 0:
+                _tprint(f"    Enriched {done}/{total}...")
             stats = fut.result()
             if stats is None:
                 continue
-            # Apply remaining filters (account age + inactivity — need profile data)
             if stats["days_since_last_trade"] > MAX_INACTIVE_DAYS:
                 continue
-            # Only reject on age if we actually got the data (0 means API didn't return it)
             if stats["account_age_days"] > 0 and stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
                 continue
             results.append(stats)
 
-    results.sort(key=lambda x: x["pnl"], reverse=True)
+    # Sort by leaderboard PnL (already ranked but results may be reordered by futures)
+    results.sort(key=lambda x: x["leaderboard_pnl"], reverse=True)
     return results
 
 
+# ── Display ───────────────────────────────────────────────────────────────────
+
 def format_wallet_summary(w: dict) -> str:
     """Format a wallet for Telegram display."""
-    addr_short = f"{w['address'][:10]}...{w['address'][-6:]}"
+    addr = w["address"]
+    addr_short = f"{addr[:10]}...{addr[-6:]}"
     name = w.get("nickname") or addr_short
-    specialist = f"{w['main_category']} ({w['category_pct']}%)"
     age = w.get("account_age_days", 0)
     total_trades = w.get("total_historical_trades", 0)
+    rank = w.get("rank", 0)
+    lb_pnl = w.get("leaderboard_pnl", w.get("pnl", 0))
+    open_pos = w.get("open_positions", w.get("positions", 0))
+    category = w.get("main_category", "Mixed")
+    cat_pct = w.get("category_pct", 0)
+
+    profile_url = f"https://polymarket.com/profile/{addr}"
 
     if w["days_since_last_trade"] < 1:
         active = "Hoy"
@@ -338,66 +404,44 @@ def format_wallet_summary(w: dict) -> str:
     else:
         age_str = f"{age}d"
 
-    trust = 0
-    if age >= 180:
-        trust += 3
-    elif age >= 90:
-        trust += 2
-    elif age >= 30:
-        trust += 1
-    if w["win_rate"] >= 0.65:
-        trust += 2
-    elif w["win_rate"] >= 0.55:
-        trust += 1
-    if total_trades >= 200:
-        trust += 2
-    elif total_trades >= 50:
-        trust += 1
-    if w["roi"] >= 10:
-        trust += 1
-
-    trust_bar = "🟢" * min(trust, 5) + "⚪" * max(5 - trust, 0)
-
-    addr = w['address']
-    profile_url = f"https://polymarket.com/profile/{addr}"
+    rank_str = f"#{rank} " if rank else ""
+    pnl_str = f"+${lb_pnl:,.0f}" if lb_pnl >= 0 else f"-${abs(lb_pnl):,.0f}"
+    specialist = f"{category} ({cat_pct}%)" if cat_pct > 0 else category
 
     return (
-        f"👤 <b><a href=\"{profile_url}\">{name}</a></b>  {trust_bar}\n"
+        f"👤 {rank_str}<b><a href=\"{profile_url}\">{name}</a></b>\n"
         f"    <code>{addr}</code>\n"
-        f"    💰 PnL: <b>${w['pnl']:,.2f}</b> (ROI: {w['roi']}%)\n"
-        f"    📊 WR: <b>{w['win_rate']:.0%}</b> ({w['wins']}W/{w['losses']}L)\n"
+        f"    💰 PnL (leaderboard): <b>{pnl_str}</b>\n"
         f"    🏷 Especialidad: {specialist}\n"
-        f"    📈 Posiciones: {w['positions']} | Invertido: ${w['total_invested']:,.0f}\n"
+        f"    📈 Posiciones abiertas: {open_pos}\n"
         f"    🕐 Ultimo trade: {active}\n"
         f"    🗓 Cuenta: <b>{age_str}</b> | Trades totales: {total_trades}+"
     )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Find profitable Polymarket wallets")
-    parser.add_argument("--limit", type=int, default=50, help="Number of top markets to scan")
+    parser = argparse.ArgumentParser(description="Find profitable Polymarket wallets from leaderboard")
     parser.add_argument("--top", type=int, default=10, help="Number of top wallets to show")
+    parser.add_argument("--period", type=str, default="all", choices=["today", "weekly", "monthly", "all"],
+                        help="Leaderboard period")
     args = parser.parse_args()
 
     t0 = time.time()
     print("=" * 65)
-    print("  Polymarket Wallet Scanner  [PARALLEL MODE]")
-    print(f"  Filters: PnL>${MIN_PNL} | WR>{MIN_WIN_RATE:.0%} | ROI>{MIN_ROI}% | Pos>{MIN_POSITIONS} | Active<{MAX_INACTIVE_DAYS}d | Age>{MIN_ACCOUNT_AGE_DAYS}d")
-    print(f"  Workers: {MARKET_WORKERS} markets / {WALLET_WORKERS} wallets")
+    print("  Polymarket Wallet Scanner  [LEADERBOARD MODE]")
+    print(f"  Source: polymarket.com/leaderboard (period={args.period})")
+    print(f"  Filters: Active<{MAX_INACTIVE_DAYS}d | Age>{MIN_ACCOUNT_AGE_DAYS}d")
     print("=" * 65)
-    print(f"\n  Fetching top {args.limit} markets by volume...\n")
 
-    markets = get_top_markets(args.limit)
-    results = find_profitable_wallets(markets)
+    results = find_profitable_wallets()
 
     elapsed = time.time() - t0
     print(f"\n{'=' * 65}")
-    print(f"  Found {len(results)} wallets matching criteria  ({elapsed:.0f}s)")
+    print(f"  Found {len(results)} wallets  ({elapsed:.0f}s)")
     print(f"{'=' * 65}\n")
 
     for i, w in enumerate(results[:args.top], 1):
         name = w.get("nickname") or f"{w['address'][:10]}...{w['address'][-6:]}"
-        specialist = f"{w['main_category']} ({w['category_pct']}%)"
         age = w.get("account_age_days", 0)
         active = "Hoy" if w["days_since_last_trade"] < 1 else f"{w['days_since_last_trade']:.0f}d ago"
 
@@ -408,20 +452,19 @@ def main():
         else:
             age_str = f"{age}d"
 
-        print(f"  #{i} {name}")
-        print(f"     Address:    {w['address']}")
-        print(f"     PnL:        ${w['pnl']:,.2f} (ROI: {w['roi']}%)")
-        print(f"     Win rate:   {w['win_rate']:.0%} ({w['wins']}W / {w['losses']}L)")
-        print(f"     Focus:      {specialist}")
-        print(f"     Invested:   ${w['total_invested']:,.0f} | Positions: {w['positions']}")
-        print(f"     Active:     {active}")
-        print(f"     Account:    {age_str} old | {w['total_historical_trades']}+ total trades")
+        print(f"  #{w.get('rank', i)} {name}")
+        print(f"     Address:  {w['address']}")
+        print(f"     PnL:      ${w['leaderboard_pnl']:,.0f}  (leaderboard)")
+        print(f"     Category: {w['main_category']} ({w['category_pct']}%)")
+        print(f"     Open pos: {w['open_positions']}")
+        print(f"     Active:   {active}")
+        print(f"     Account:  {age_str} old | {w['total_historical_trades']}+ total trades")
         print()
 
     if results:
-        print(f"  To add the top wallet:")
         top = results[0]
         name = top.get("nickname") or "trader"
+        print(f"  To add the top wallet:")
         print(f"  /addwallet {top['address']} {name}")
 
     print()
