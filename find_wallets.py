@@ -16,7 +16,8 @@ import time
 import argparse
 import requests
 from collections import Counter
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
@@ -27,6 +28,17 @@ MIN_WIN_RATE = 0.55
 MIN_POSITIONS = 10
 MAX_INACTIVE_DAYS = 7
 MIN_ACCOUNT_AGE_DAYS = 30  # Minimum account age to filter out fresh "lucky" wallets
+
+# Parallelism
+MARKET_WORKERS = 10   # concurrent market scrapers
+WALLET_WORKERS = 20   # concurrent wallet analyzers
+
+# Thread-safe print lock
+_print_lock = threading.Lock()
+
+def _tprint(*args, **kwargs):
+    with _print_lock:
+        print(*args, **kwargs)
 
 
 def get_top_markets(limit: int = 50) -> list[dict]:
@@ -40,6 +52,37 @@ def get_top_markets(limit: int = 50) -> list[dict]:
     return resp.json()
 
 
+def _fetch_market_traders(market: dict, quiet: bool = False) -> set:
+    """Scrape all trader addresses from a single market. Returns a set of addresses."""
+    condition_id = market.get("conditionId", "")
+    slug = market.get("slug", "")
+    question = market.get("question", slug)[:60]
+    addresses = set()
+
+    try:
+        for offset in range(0, 500, 100):
+            resp = requests.get(
+                f"{DATA_API}/trades",
+                params={"market": condition_id, "limit": 100, "offset": offset},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            trades = resp.json()
+            if not trades:
+                break
+            for trade in trades:
+                addr = trade.get("proxyWallet")
+                if addr:
+                    addresses.add(addr.lower())
+        if not quiet:
+            _tprint(f"  OK {question} ({len(addresses)} traders)")
+    except Exception as e:
+        if not quiet:
+            _tprint(f"  ERR {question}: {e}")
+
+    return addresses
+
+
 def _get_profile(address: str) -> dict:
     """Fetch nickname and first trade timestamp from activity history."""
     nickname = ""
@@ -47,7 +90,6 @@ def _get_profile(address: str) -> dict:
     total_historical_trades = 0
 
     try:
-        # Get most recent activity for nickname
         resp = requests.get(
             f"{DATA_API}/activity",
             params={"user": address, "limit": 1},
@@ -60,10 +102,7 @@ def _get_profile(address: str) -> dict:
     except Exception:
         pass
 
-    # Get oldest activity to determine account age
-    # We paginate backwards to find the first trade
     try:
-        # First check how many trades roughly (get a high offset)
         for check_offset in [500, 200, 50]:
             resp = requests.get(
                 f"{DATA_API}/activity",
@@ -75,11 +114,9 @@ def _get_profile(address: str) -> dict:
             if data:
                 total_historical_trades = check_offset + 1
                 first_trade_ts = float(data[0].get("timestamp", 0))
-                # Keep going to find even older
             else:
                 break
 
-        # If we found trades at offset 500, try to find the actual oldest
         if total_historical_trades > 500:
             for check_offset in [2000, 1000, 750]:
                 try:
@@ -97,7 +134,6 @@ def _get_profile(address: str) -> dict:
                         break
                 except Exception:
                     break
-
     except Exception:
         pass
 
@@ -106,36 +142,6 @@ def _get_profile(address: str) -> dict:
         "first_trade_ts": first_trade_ts,
         "total_historical_trades": total_historical_trades,
     }
-
-
-def _get_closed_pnl(address: str) -> float:
-    """Estimate PnL from closed/resolved positions via activity history."""
-    closed_pnl = 0.0
-    try:
-        # Get recent activity to find resolved trades (price ~1.0 or ~0.0)
-        resp = requests.get(
-            f"{DATA_API}/activity",
-            params={"user": address, "limit": 100},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        activities = resp.json()
-
-        for act in activities:
-            price = float(act.get("price", 0))
-            size = float(act.get("size", 0))
-            side = (act.get("side") or "").upper()
-
-            # Resolved market cashouts: buying at ~1.0 means collecting winnings
-            # The actual profit was from the original entry, not the cashout
-            # We skip these as they're already reflected in positions or hard to calculate
-            # But selling at ~1.0 on a BUY position = realized gain
-            if side == "SELL" and price >= 0.95:
-                closed_pnl += size * (price - 0.5)  # rough estimate
-    except Exception:
-        pass
-
-    return round(closed_pnl, 2)
 
 
 def scan_wallet(address: str) -> dict:
@@ -177,7 +183,6 @@ def scan_wallet(address: str) -> dict:
         else:
             losses += 1
 
-        # Detect category from title
         title = (pos.get("title") or "").lower()
         if any(w in title for w in ["counter-strike", "cs2", "dota", "league of legends", "valorant"]):
             categories["Esports"] += 1
@@ -201,23 +206,28 @@ def scan_wallet(address: str) -> dict:
     win_rate = wins / total
     roi = (total_pnl / total_invested * 100) if total_invested > 0 else 0
 
-    # Main category
+    # --- Pre-filter before expensive profile calls ---
+    if total < MIN_POSITIONS:
+        return None
+    if total_pnl < MIN_PNL:
+        return None
+    if win_rate < MIN_WIN_RATE:
+        return None
+
     main_cat = categories.most_common(1)[0] if categories else ("Unknown", 0)
     cat_pct = main_cat[1] / total if total > 0 else 0
 
-    # Get profile: nickname, account age, total trades
+    # Full profile (nickname + account age) — only for wallets that passed pre-filter
     profile = _get_profile(address)
     nickname = profile["nickname"]
     first_trade_ts = profile["first_trade_ts"]
     total_historical_trades = profile["total_historical_trades"]
 
-    # Calculate account age
     if first_trade_ts > 0:
         account_age_days = (time.time() - first_trade_ts) / 86400
     else:
         account_age_days = 0
 
-    # Get last trade time from most recent activity
     last_trade_ts = 0
     try:
         resp = requests.get(
@@ -255,64 +265,42 @@ def scan_wallet(address: str) -> dict:
 
 def find_profitable_wallets(markets: list[dict], quiet: bool = False) -> list[dict]:
     """Find wallets matching our criteria from active markets."""
-    trader_addresses = set()
 
-    for market in markets:
-        slug = market.get("slug", "")
-        condition_id = market.get("conditionId", "")
-        if not quiet:
-            print(f"  Scanning: {market.get('question', slug)[:60]}...")
+    # --- Phase 1: scrape all markets in parallel ---
+    trader_addresses: set = set()
+    if not quiet:
+        _tprint(f"\n  Scraping {len(markets)} markets in parallel ({MARKET_WORKERS} workers)...\n")
 
-        try:
-            # 5 pages of 100 = 500 trades per market
-            for offset in range(0, 500, 100):
-                resp = requests.get(
-                    f"{DATA_API}/trades",
-                    params={"market": condition_id, "limit": 100, "offset": offset},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                trades = resp.json()
-                if not trades:
-                    break
-                for trade in trades:
-                    addr = trade.get("proxyWallet")
-                    if addr:
-                        trader_addresses.add(addr.lower())
-
-            if not quiet:
-                print(f"    OK")
-        except Exception as e:
-            if not quiet:
-                print(f"    Error: {e}")
+    with ThreadPoolExecutor(max_workers=MARKET_WORKERS) as ex:
+        futures = {ex.submit(_fetch_market_traders, m, quiet): m for m in markets}
+        for fut in as_completed(futures):
+            trader_addresses |= fut.result()
 
     if not quiet:
-        print(f"\n  Found {len(trader_addresses)} unique traders. Analyzing...\n")
+        _tprint(f"\n  Found {len(trader_addresses)} unique traders. Analyzing in parallel ({WALLET_WORKERS} workers)...\n")
 
+    # --- Phase 2: analyze all wallets in parallel ---
     results = []
-    for i, addr in enumerate(trader_addresses):
-        if not quiet and (i + 1) % 25 == 0:
-            print(f"    Analyzed {i + 1}/{len(trader_addresses)}...")
+    done = 0
+    total_addrs = len(trader_addresses)
+    addr_list = list(trader_addresses)
 
-        stats = scan_wallet(addr)
-        if stats is None:
-            continue
+    with ThreadPoolExecutor(max_workers=WALLET_WORKERS) as ex:
+        futures = {ex.submit(scan_wallet, addr): addr for addr in addr_list}
+        for fut in as_completed(futures):
+            done += 1
+            if not quiet and done % 50 == 0:
+                _tprint(f"    Analyzed {done}/{total_addrs}...")
+            stats = fut.result()
+            if stats is None:
+                continue
+            # Apply remaining filters (account age + inactivity — need profile data)
+            if stats["days_since_last_trade"] > MAX_INACTIVE_DAYS:
+                continue
+            if stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
+                continue
+            results.append(stats)
 
-        # Apply filters
-        if stats["positions"] < MIN_POSITIONS:
-            continue
-        if stats["pnl"] < MIN_PNL:
-            continue
-        if stats["win_rate"] < MIN_WIN_RATE:
-            continue
-        if stats["days_since_last_trade"] > MAX_INACTIVE_DAYS:
-            continue
-        if stats["account_age_days"] < MIN_ACCOUNT_AGE_DAYS:
-            continue
-
-        results.append(stats)
-
-    # Sort by PnL
     results.sort(key=lambda x: x["pnl"], reverse=True)
     return results
 
@@ -337,7 +325,6 @@ def format_wallet_summary(w: dict) -> str:
     else:
         age_str = f"{age}d"
 
-    # Trust score: simple heuristic
     trust = 0
     if age >= 180:
         trust += 3
@@ -376,17 +363,20 @@ def main():
     parser.add_argument("--top", type=int, default=10, help="Number of top wallets to show")
     args = parser.parse_args()
 
+    t0 = time.time()
     print("=" * 65)
-    print("  Polymarket Wallet Scanner")
+    print("  Polymarket Wallet Scanner  [PARALLEL MODE]")
     print(f"  Filters: PnL>${MIN_PNL} | WR>{MIN_WIN_RATE:.0%} | Pos>{MIN_POSITIONS} | Active<{MAX_INACTIVE_DAYS}d | Age>{MIN_ACCOUNT_AGE_DAYS}d")
+    print(f"  Workers: {MARKET_WORKERS} markets / {WALLET_WORKERS} wallets")
     print("=" * 65)
     print(f"\n  Fetching top {args.limit} markets by volume...\n")
 
     markets = get_top_markets(args.limit)
     results = find_profitable_wallets(markets)
 
+    elapsed = time.time() - t0
     print(f"\n{'=' * 65}")
-    print(f"  Found {len(results)} wallets matching criteria")
+    print(f"  Found {len(results)} wallets matching criteria  ({elapsed:.0f}s)")
     print(f"{'=' * 65}\n")
 
     for i, w in enumerate(results[:args.top], 1):
