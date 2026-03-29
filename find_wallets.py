@@ -154,6 +154,53 @@ def get_leaderboard_wallets(period: str = "all") -> list[dict]:
 
 # ── Profile / activity helpers ────────────────────────────────────────────────
 
+def _count_activity(address: str) -> tuple[int, float]:
+    """
+    Count exact total trades by paginating /activity in batches of 500.
+    Returns (total_trades, first_trade_ts).
+
+    The /activity endpoint doesn't have a reliable 'end of data' signal via offset,
+    so we paginate and stop when a page returns fewer than 500 entries or repeats.
+    Caps at 5000 trades (10 pages) to avoid infinite loops on very active traders.
+    """
+    total = 0
+    first_trade_ts = 0.0
+    page_size = 500
+    API_HARD_LIMIT = 3500  # /activity won't return reliable data past offset ~3500
+
+    for page in range(API_HARD_LIMIT // page_size + 1):
+        offset = page * page_size
+        try:
+            resp = requests.get(
+                f"{DATA_API}/activity",
+                params={"user": address, "limit": page_size, "offset": offset},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            break
+
+        if not data:
+            break
+
+        # API quirk: returns exactly 1 garbage entry past the real data boundary
+        if len(data) < 10 and page > 0:
+            break
+
+        total += len(data)
+
+        oldest_ts = float(data[-1].get("timestamp", 0))
+        if oldest_ts > 0:
+            first_trade_ts = oldest_ts
+
+        # Genuine last page (partial) — exact count reached
+        if len(data) < page_size:
+            break
+
+    return total, first_trade_ts
+
+
 def _get_profile(address: str) -> dict:
     """Fetch nickname and first trade timestamp from activity history."""
     nickname = ""
@@ -174,37 +221,7 @@ def _get_profile(address: str) -> dict:
         pass
 
     try:
-        for check_offset in [500, 200, 50]:
-            resp = requests.get(
-                f"{DATA_API}/activity",
-                params={"user": address, "limit": 1, "offset": check_offset},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if data:
-                total_historical_trades = check_offset + 1
-                first_trade_ts = float(data[0].get("timestamp", 0))
-            else:
-                break
-
-        if total_historical_trades > 500:
-            for check_offset in [2000, 1000, 750]:
-                try:
-                    resp = requests.get(
-                        f"{DATA_API}/activity",
-                        params={"user": address, "limit": 1, "offset": check_offset},
-                        timeout=10,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if data:
-                        total_historical_trades = check_offset + 1
-                        first_trade_ts = float(data[0].get("timestamp", 0))
-                    else:
-                        break
-                except Exception:
-                    break
+        total_historical_trades, first_trade_ts = _count_activity(address)
     except Exception:
         pass
 
@@ -248,21 +265,9 @@ def scan_wallet(address: str, leaderboard_data: dict = None) -> dict:
     except Exception:
         pass
 
-    # Account age: try a few offsets
+    # Account age + exact trade count via binary search
     try:
-        for check_offset in [200, 50]:
-            resp = requests.get(
-                f"{DATA_API}/activity",
-                params={"user": address, "limit": 1, "offset": check_offset},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if data:
-                total_historical_trades = check_offset + 1
-                first_trade_ts = float(data[0].get("timestamp", 0))
-            else:
-                break
+        total_historical_trades, first_trade_ts = _count_activity(address)
     except Exception:
         pass
 
@@ -429,6 +434,8 @@ def format_wallet_summary(w: dict) -> str:
     roi_str = f"+{roi:.0f}%" if roi >= 0 else f"{roi:.0f}%"
     portfolio_str = f"${portfolio_value:,.0f}" if portfolio_value > 0 else "N/A"
 
+    trades_str = f"{total_trades}+" if total_trades >= 3500 else str(total_trades)
+
     return (
         f"👤 {rank_str}<b><a href=\"{profile_url}\">{name}</a></b>\n"
         f"    <code>{addr}</code>\n"
@@ -437,7 +444,7 @@ def format_wallet_summary(w: dict) -> str:
         f"    🏷 Especialidad: {specialist}\n"
         f"    📈 Posiciones abiertas: {open_pos}\n"
         f"    🕐 Ultimo trade: {active}\n"
-        f"    🗓 Cuenta: <b>{age_str}</b> | Trades totales: {total_trades}+"
+        f"    🗓 Cuenta: <b>{age_str}</b> | Trades totales: {trades_str}"
     )
 
 
