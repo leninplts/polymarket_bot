@@ -61,7 +61,7 @@ class CopyTradingBot:
         wallets = wallet_manager.get_all()
         open_pos = self.positions.get_open_positions()
         print("=" * 60)
-        print(f"  Polymarket Copy-Trading Bot [{mode}]")
+        print(f"  Polymarket Copy-Trading Bot v{config.VERSION} [{mode}]")
         print(f"  Monitoring {len(wallets)} wallet(s)")
         print(f"  Open positions: {len(open_pos)}")
         print(f"  Sizing: dynamic (max ${config.FIXED_AMOUNT} based on probability)")
@@ -171,7 +171,7 @@ class CopyTradingBot:
         slug = buf["slug"]
         event_slug = buf["event_slug"]
         nick = wallet_manager.get_nickname(wallet_addr)
-        total_budget = config.FIXED_AMOUNT * 10
+        total_budget = config.TOTAL_BUDGET
         max_per_market = total_budget * config.MAX_POSITION_PCT
 
         # ── DEMO scale ────────────────────────────────────────────────────────
@@ -607,7 +607,7 @@ class CopyTradingBot:
                 self.reliability.check_reliability()
 
             except Exception as e:
-                print(f"\n[error] {e}")
+                print(f"\n[error] v{config.VERSION} {e}")
                 tg.notify_error(str(e))
 
             time.sleep(config.POLL_INTERVAL)

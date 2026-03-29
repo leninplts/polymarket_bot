@@ -50,7 +50,7 @@ def notify_bot_started(wallets: list[str], dry_run: bool):
     wallet_list = "\n".join(f"    └ {_trader_link(w)}" for w in wallets)
     _send(
         f"{'━' * 28}\n"
-        f"🚀 <b>BOT INICIADO</b>  │  {mode}\n"
+        f"🚀 <b>BOT INICIADO v{config.VERSION}</b>  │  {mode}\n"
         f"{'━' * 28}\n\n"
         f"👁 Monitoreando {len(wallets)} wallet(s):\n{wallet_list}\n\n"
         f"💰 Sizing: <b>{config.SIZING_MODE}</b> "
@@ -63,7 +63,7 @@ def notify_bot_started(wallets: list[str], dry_run: bool):
 def notify_shutdown(stats: dict):
     _send(
         f"{'━' * 28}\n"
-        f"🛑 <b>BOT DETENIDO</b>\n"
+        f"🛑 <b>BOT DETENIDO</b>  │  v{config.VERSION}\n"
         f"{'━' * 28}\n\n"
         f"📋 <b>Resumen de sesion:</b>\n"
         f"    Detectados:  {stats.get('trades_detected', 0)}\n"
@@ -457,7 +457,7 @@ def notify_trade_buffer_summary(nickname: str, market_name: str, count: int,
 def notify_error(error: str):
     _send(
         f"{'━' * 28}\n"
-        f"🚨 <b>ERROR</b>\n"
+        f"🚨 <b>ERROR</b>  │  v{config.VERSION}\n"
         f"{'━' * 28}\n\n"
         f"<code>{error[:500]}</code>"
     )

@@ -190,7 +190,7 @@ class TelegramCommands:
 
         self._reply(
             f"{'━' * 28}\n"
-            f"📊 <b>ESTADO DEL BOT</b>\n"
+            f"📊 <b>ESTADO DEL BOT</b>  │  v{config.VERSION}\n"
             f"{'━' * 28}\n\n"
             f"Override global: {global_mode}\n"
             f"Estado: {state}\n\n"

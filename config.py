@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+VERSION = "0.5.0"
 
 PRIVATE_KEY = os.environ["PRIVATE_KEY"]
 TARGET_WALLETS = [w.strip().lower() for w in os.environ["TARGET_WALLETS"].split(",") if w.strip()]
@@ -12,10 +13,12 @@ FIXED_AMOUNT = float(os.getenv("FIXED_AMOUNT", "2"))
 PROPORTIONAL_FACTOR = float(os.getenv("PROPORTIONAL_FACTOR", "0.1"))
 
 # Scaling: follow the trader when they keep adding to the same position
-# MAX_POSITION_PCT: max % of FIXED_AMOUNT*10 we'll put in a single market (default 20% = 2x FIXED_AMOUNT)
+# TOTAL_BUDGET: total capital available — used to calculate max position per market
+# MAX_POSITION_PCT: max % of TOTAL_BUDGET we'll put in a single market (default 5%)
 # SCALE_ON_CONVICTION: only scale if trader's new order price >= our last entry price (price going up = conviction)
 # Without this flag we'd average down on losing positions too
-MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.20"))  # 20% of total budget per market
+TOTAL_BUDGET = float(os.getenv("TOTAL_BUDGET", os.getenv("DEMO_BALANCE", "100")))
+MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.05"))  # 5% of total budget per market
 SCALE_ON_CONVICTION = os.getenv("SCALE_ON_CONVICTION", "true").lower() == "true"
 
 DEMO_BALANCE = float(os.getenv("DEMO_BALANCE", "100.0"))  # Starting balance for demo mode
