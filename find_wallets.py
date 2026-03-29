@@ -3,11 +3,11 @@ Polymarket Wallet Scanner
 
 Finds profitable wallets based on:
 - PnL > $500
-- Win rate > 55%
-- Minimum 10 positions
+- Win rate > 55% (excluding resolved/extreme-price positions)
+- ROI > 10%
+- Minimum 5 positions (excluding resolved markets)
 - Active in last 7 days
-- Account age > 30 days (anti-survivorship bias)
-- Shows main category, nickname, account age
+- Account age > 30 days (anti-survivorship bias, skipped if API returns no data)
 
 Can run standalone or be called by the bot for auto-scanning.
 """
@@ -25,9 +25,10 @@ DATA_API = "https://data-api.polymarket.com"
 # Filters
 MIN_PNL = 500
 MIN_WIN_RATE = 0.55
-MIN_POSITIONS = 5
+MIN_ROI = 10.0          # Minimum ROI % — filters low-capital wallets that got lucky
+MIN_POSITIONS = 5       # Excluding resolved/extreme-price markets
 MAX_INACTIVE_DAYS = 7
-MIN_ACCOUNT_AGE_DAYS = 30  # Minimum account age to filter out fresh "lucky" wallets
+MIN_ACCOUNT_AGE_DAYS = 30  # Skipped if API returns 0 (data unavailable)
 
 # Parallelism
 MARKET_WORKERS = 10   # concurrent market scrapers
@@ -165,6 +166,7 @@ def scan_wallet(address: str) -> dict:
     total_pnl = 0.0
     total_invested = 0.0
     categories = Counter()
+    skipped_resolved = 0
 
     for pos in positions:
         size = float(pos.get("size", 0))
@@ -173,6 +175,13 @@ def scan_wallet(address: str) -> dict:
 
         avg_price = float(pos.get("avgPrice", 0))
         cur_price = float(pos.get("curPrice") or pos.get("currentPrice", 0))
+
+        # Skip resolved/about-to-resolve markets — prices at extremes inflate WR artificially.
+        # A trader holding YES at 0.98 didn't "win" through skill, the market already resolved.
+        if cur_price >= 0.95 or cur_price <= 0.05:
+            skipped_resolved += 1
+            continue
+
         invested = size * avg_price
         pnl = size * (cur_price - avg_price)
         total_pnl += pnl
@@ -213,6 +222,8 @@ def scan_wallet(address: str) -> dict:
         return None
     if win_rate < MIN_WIN_RATE:
         return None
+    if roi < MIN_ROI:
+        return None
 
     main_cat = categories.most_common(1)[0] if categories else ("Unknown", 0)
     cat_pct = main_cat[1] / total if total > 0 else 0
@@ -249,6 +260,7 @@ def scan_wallet(address: str) -> dict:
         "positions": total,
         "wins": wins,
         "losses": losses,
+        "skipped_resolved": skipped_resolved,
         "pnl": round(total_pnl, 2),
         "roi": round(roi, 1),
         "win_rate": round(win_rate, 2),
@@ -367,7 +379,7 @@ def main():
     t0 = time.time()
     print("=" * 65)
     print("  Polymarket Wallet Scanner  [PARALLEL MODE]")
-    print(f"  Filters: PnL>${MIN_PNL} | WR>{MIN_WIN_RATE:.0%} | Pos>{MIN_POSITIONS} | Active<{MAX_INACTIVE_DAYS}d | Age>{MIN_ACCOUNT_AGE_DAYS}d")
+    print(f"  Filters: PnL>${MIN_PNL} | WR>{MIN_WIN_RATE:.0%} | ROI>{MIN_ROI}% | Pos>{MIN_POSITIONS} | Active<{MAX_INACTIVE_DAYS}d | Age>{MIN_ACCOUNT_AGE_DAYS}d")
     print(f"  Workers: {MARKET_WORKERS} markets / {WALLET_WORKERS} wallets")
     print("=" * 65)
     print(f"\n  Fetching top {args.limit} markets by volume...\n")

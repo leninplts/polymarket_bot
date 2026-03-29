@@ -373,7 +373,7 @@ class TelegramCommands:
                 self._reply(
                     "🔍 <b>Scan completado</b>\n\n"
                     "No se encontraron wallets que cumplan:\n"
-                    "  PnL>$500 | WR>55% | 10+pos | Activo<7d | Cuenta>30d"
+                    "  PnL>$500 | WR>55% | ROI>10% | 5+pos | Activo<7d | Cuenta>30d"
                 )
                 return
 
